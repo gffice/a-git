@@ -1,0 +1,36 @@
+name: Sync with Upstream
+
+on:
+  schedule:
+    # 每天 UTC 时间 00:00 运行 (北京时间 08:00)
+    - cron: '0 0 * * *'
+  workflow_dispatch: # 添加手动触发选项
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取所有历史记录
+
+      - name: Add upstream repository
+        run: |
+          git remote add upstream https://gitlab.torproject.org/tpo/core/arti.git
+          git fetch upstream
+
+      - name: Merge upstream changes
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout main # 切换到你的主分支（如 main/master）
+          git merge upstream/main --allow-unrelated-histories -m "自动同步上游仓库"
+          
+          # 解决冲突策略：优先使用上游版本
+          git checkout --theirs . || true
+          git add .
+          git commit -m "使用上游版本解决冲突" || true
+
+      - name: Push changes
+        run: git push origin main
