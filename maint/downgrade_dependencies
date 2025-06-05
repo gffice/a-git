@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+#
+# Downgrades every one of our dependencies in Cargo.lock to the
+# earliest version listed in our Cargo.toml files.  (And then
+# re-upgrades a few second-order dependencies that aren't actually
+# supported by our first-order dependencies in their oldest versions.)
+#
+# The purpose of this script is to make sure that we are actually
+# compatible with the versions listed in our Cargo.toml files.
+# Without testing this, we could wind up with code that built
+# successfully with the versions listed in Cargo.lock, while declaring
+# support for versions of our dependencies that won't actually work.
+
+set -euo pipefail
+
+: "${CARGO:=cargo}"
+
+$CARGO +nightly update -Z minimal-versions
+$CARGO update \
+      -p crc32fast \
+      -p zeroize_derive:1.3.2 \
+      -p filetime \
+      -p tap:1.0.0 \
+      -p event-listener:3.0.0 \
+      -p yoke:0.6.0

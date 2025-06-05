@@ -1,0 +1,29 @@
+[package]
+name = "fslock-guard"
+version = "0.2.2"
+authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+homepage = "https://gitlab.torproject.org/tpo/core/arti/-/wikis/home"
+description = "Wrapper around a lockfile with unlock-on-drop semantics"
+keywords = ["fs", "file", "lock"]
+categories = ["filesystem"]
+repository = "https://gitlab.torproject.org/tpo/core/arti.git/"
+rust-version = "1.83"
+
+[features]
+default = []
+full = []
+
+[dependencies]
+fslock = { version = "0.2.0", package = "fslock-arti-fork" }
+thiserror = "2"
+
+[dev-dependencies]
+test-temp-dir = { version = "0.3.3", path = "../test-temp-dir" }
+
+[package.metadata.docs.rs]
+all-features = true
+
+[target.'cfg(windows)'.dependencies.winapi]
+version = "^0.3.8"

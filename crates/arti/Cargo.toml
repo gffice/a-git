@@ -1,0 +1,217 @@
+[package]
+name = "arti"
+version = "1.4.3"
+authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
+edition = "2021"
+rust-version = "1.83"
+license = "MIT OR Apache-2.0"
+homepage = "https://gitlab.torproject.org/tpo/core/arti/-/wikis/home"
+description = "A rust implementation of the Tor privacy tools."
+keywords = ["tor", "arti", "privacy", "anonymity"]
+categories = ["command-line-utilities", "cryptography"]
+repository = "https://gitlab.torproject.org/tpo/core/arti.git/"
+#
+# We need a runtime
+# @@ test-all-crates conditional-option minimal --features=default-runtime
+
+[features]
+default = [
+    "default-runtime",
+    "dns-proxy",
+    "harden",
+    "compression",
+    "bridge-client",
+    "pt-client",
+    "onion-service-client",
+    "vanguards",
+]
+
+full = [
+    "default-runtime",
+    "memquota",
+    "onion-service-client",
+    "onion-service-service",
+    "vanguards",
+    "async-std",
+    "tokio",
+    "native-tls",
+    "journald",
+    "arti-client/full",
+    "dns-proxy",
+    "harden",
+    "compression",
+    "bridge-client",
+    "pt-client",
+    "arti-rpcserver?/full",
+    "fs-mistrust/full",
+    "rpc",
+    "safelog/full",
+    "tor-config/full",
+    "tor-error/full",
+    "tor-rtcompat/full",
+    "tor-socksproto/full",
+    "tor-rpcbase?/full",
+    "tor-hsrproxy?/full",
+    "tor-hsservice?/full",
+    "tor-async-utils/full",
+    "tor-config-path/full",
+    "tor-basic-utils/full",
+    "tor-rpc-connect?/full",
+    "signal-hook",
+    "signal-hook-async-std",
+    "dialoguer",
+]
+
+async-std = [
+    "arti-client/async-std",
+    "tor-rtcompat/async-std",
+    "async-ctrlc",
+    "async-signal",
+]
+bridge-client = ["arti-client/bridge-client"]
+default-runtime = ["tokio", "native-tls"]
+dns-proxy = ["hickory-proto"]
+experimental-api = ["arti-client/experimental-api", "visibility", "__is_experimental"]
+harden = ["secmem-proc"]
+keymgr = ["arti-client/keymgr", "__is_experimental"]
+memquota = ["arti-client/memquota"]
+tokio = ["tokio-crate", "arti-client/tokio", "tor-rtcompat/tokio", "tokio-util"]
+native-tls = ["arti-client/native-tls", "tor-rtcompat/native-tls"]
+onion-service-client = ["arti-client/onion-service-client"]
+onion-service-service = ["arti-client/onion-service-service", "tor-hsrproxy", "tor-hsservice"]
+vanguards = ["arti-client/vanguards"]
+hs-pow-full = ["arti-client/hs-pow-full", "__is_experimental"]
+pt-client = ["bridge-client", "arti-client/pt-client"]
+ctor-keystore = ["arti-client/ctor-keystore", "__is_experimental"]
+
+rpc = ["arti-rpcserver", "tor-rpcbase", "tor-rpc-connect", "derive-deftly"]
+
+# This is not nonadditive from a software POV, but we mark it as such because it
+# includes code licensed under the old OpenSSL license (which was 4-clause BSD),
+# which in turn introduces a GPL-incompatibility.
+rustls = [
+    "arti-client/rustls",
+    "tor-rtcompat/rustls",
+    "rustls-crate",
+    "__is_nonadditive",
+]
+
+# depends directly on arti-client/static so native-tls doesn't get automatically included
+static = ["arti-client/static", "__is_nonadditive"]
+static-sqlite = ["arti-client/static-sqlite", "__is_nonadditive"]
+static-native-tls = ["arti-client/static-native-tls", "native-tls", "__is_nonadditive"]
+journald = ["tracing-journald"]
+
+accel-sha1-asm = ["arti-client/accel-sha1-asm", "__is_nonadditive"]
+accel-openssl = ["arti-client/accel-openssl", "__is_nonadditive"]
+
+__is_nonadditive = []
+
+compression = ["arti-client/compression"]
+
+# This feature flag enables experimental features that are not supported. Turning it on may
+# void your API.
+experimental = [
+    "arti-client/experimental",
+    "experimental-api",
+    "hs-pow-full",
+    "keymgr",
+    "metrics",
+    "restricted-discovery",
+    "hsc",
+    "tor-hsservice/experimental",
+    "ctor-keystore",
+]
+metrics = [
+    "dep:metrics-exporter-prometheus",
+    "tor-hsrproxy?/metrics",
+    "__is_experimental",
+]
+
+restricted-discovery = ["tor-hsservice/restricted-discovery", "__is_experimental"]
+hsc = ["onion-service-client", "experimental-api", "keymgr", "__is_experimental"]
+__is_experimental = []
+
+# These features exist for backwards compatibility, and shouldn't be used directly.
+# Next time we do a version bump, it would be good to get rid of them.
+
+signal-hook = ["async-signal"]
+signal-hook-async-std = ["async-signal"]
+dialoguer = []
+
+[dependencies]
+anyhow = "1.0.23"
+arti-client = { package = "arti-client", path = "../arti-client", version = "0.30.0", default-features = false, features = [
+    "anyhow",
+] }
+arti-rpcserver = { path = "../arti-rpcserver", version = "0.30.0", optional = true }
+async-ctrlc = { version = "1.2.0", optional = true }
+async-signal = { version = "0.2.10", optional = true }
+cfg-if = "1.0.0"
+clap = { version = "4.3.24", features = ["string", "wrap_help", "derive"] }
+derive-deftly = { version = "~1.0.0", features = ["full", "beta"], optional = true }
+derive_builder = { version = "0.11", package = "derive_builder_fork_arti" }
+fs-mistrust = { path = "../fs-mistrust", version = "0.9.1" }
+futures = "0.3.14"
+hickory-proto = { version = "0.24.4", optional = true }
+humantime = "2"
+humantime-serde = "1.1.1"
+itertools = "0.14.0"
+libc = "0.2"
+metrics-exporter-prometheus = { version = "0.17.0", optional = true, default-features = false, features = ["http-listener"] }
+notify = { version = "8", default-features = false, features = ["macos_kqueue"] }
+paste = "1"
+postage = { version = "0.5.0", default-features = false, features = ["futures-traits"] }
+rlimit = "0.10.1"
+rustls-crate = { package = "rustls", version = "0.23.5", optional = true, default-features = false, features = [
+    "tls12",
+    "logging",
+    "ring",
+] }
+safelog = { path = "../safelog", version = "0.4.5" }
+secmem-proc = { version = "0.3.4", optional = true }
+serde = { version = "1.0.103", features = ["derive"] }
+thiserror = "2"
+time = "0.3.18"
+tokio-crate = { package = "tokio", version = "1.7", optional = true, features = ["signal"] }
+tokio-util = { version = "0.7.0", features = ["compat"], optional = true }
+toml = "0.8.8"
+tor-async-utils = { path = "../tor-async-utils", version = "0.30.0" }
+tor-basic-utils = { path = "../tor-basic-utils", version = "0.30.0" }
+tor-config = { path = "../tor-config", version = "0.30.0" }
+tor-config-path = { path = "../tor-config-path", version = "0.30.0" }
+tor-error = { path = "../tor-error", version = "0.30.0", default-features = false, features = ["tracing"] }
+tor-hsrproxy = { path = "../tor-hsrproxy", version = "0.30.0", optional = true }
+tor-hsservice = { path = "../tor-hsservice", version = "0.30.0", optional = true }
+tor-rpc-connect = { path = "../tor-rpc-connect", version = "0.30.0", optional = true, features = ["rpc-server"] }
+tor-rpcbase = { path = "../tor-rpcbase", version = "0.30.0", optional = true }
+tor-rtcompat = { path = "../tor-rtcompat", version = "0.30.0", default-features = false }
+tor-socksproto = { path = "../tor-socksproto", version = "0.30.0" }
+tracing = "0.1.36"
+tracing-appender = "0.2.0"
+tracing-journald = { version = "0.3.0", optional = true }
+tracing-subscriber = { version = "0.3.0", features = ["env-filter"] }
+visibility = { version = "0.1.0", optional = true }
+
+[dev-dependencies]
+arti-client = { package = "arti-client", path = "../arti-client", version = "0.30.0", default-features = false, features = [
+    "testing",
+] }
+assert_cmd = "2.0.17"
+derive_more = { version = "2.0.1", features = ["full"] }
+itertools = "0.14.0"
+postage = { version = "0.5.0", default-features = false, features = ["futures-traits"] }
+regex = { version = "1", default-features = false, features = ["std"] }
+serde_json = "1.0.50"
+tempfile = "3"
+test-temp-dir = { version = "0.3.3", path = "../test-temp-dir" }
+tor-async-utils = { version = "0.30.0", path = "../tor-async-utils" }
+tor-config = { path = "../tor-config", version = "0.30.0", features = ["testing"] }
+tor-memquota = { version = "0.30.0", path = "../tor-memquota", default-features = false, features = ["testing"] }
+tor-rtmock = { path = "../tor-rtmock", version = "0.30.0" }
+trycmd = "0.15.4"
+[package.metadata.docs.rs]
+all-features = true
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3.8", features = ["winerror"] }
