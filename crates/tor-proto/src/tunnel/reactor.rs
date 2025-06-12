@@ -746,8 +746,6 @@ impl Reactor {
     /// processes one cell or control message.
     async fn run_once(&mut self) -> StdResult<(), ReactorError> {
         // If all the circuits are closed, shut down the reactor
-        //
-        // TODO(conflux): we might need to rethink this behavior
         if self.circuits.is_empty() {
             trace!(
                 "{}: Circuit reactor shutting down: all circuits have closed",
@@ -1366,10 +1364,6 @@ impl Reactor {
         // Note: add_legs validates `circuits`
         let res = async {
             self.circuits.add_legs(circuits, &self.runtime)?;
-
-            // TODO(conflux): check if we negotiated prop324 cc on *all* circuits,
-            // returning an error if not?
-
             self.circuits.link_circuits(&self.runtime).await
         }
         .await;
