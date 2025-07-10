@@ -979,7 +979,7 @@ mod tests {
             _item_type: &KeystoreItemType,
         ) -> Result<Option<ErasedKey>> {
             Err(Error::Keystore(Arc::new(
-                KeystoreListMockError::MethodNotSuppored,
+                KeystoreListMockError::MethodNotSupported,
             )))
         }
 
@@ -1002,7 +1002,7 @@ mod tests {
 
         fn insert(&self, _key: &dyn EncodableItem, _key_spec: &dyn KeySpecifier) -> Result<()> {
             Err(Error::Keystore(Arc::new(
-                KeystoreListMockError::MethodNotSuppored,
+                KeystoreListMockError::MethodNotSupported,
             )))
         }
 
@@ -1012,7 +1012,7 @@ mod tests {
             _item_type: &KeystoreItemType,
         ) -> Result<Option<()>> {
             Err(Error::Keystore(Arc::new(
-                KeystoreListMockError::MethodNotSuppored,
+                KeystoreListMockError::MethodNotSupported,
             )))
         }
 
@@ -1022,14 +1022,14 @@ mod tests {
             _item_type: &KeystoreItemType,
         ) -> Result<bool> {
             Err(Error::Keystore(Arc::new(
-                KeystoreListMockError::MethodNotSuppored,
+                KeystoreListMockError::MethodNotSupported,
             )))
         }
     }
 
     #[derive(thiserror::Error, Debug, Clone, derive_more::Display)]
     enum KeystoreListMockError {
-        MethodNotSuppored,
+        MethodNotSupported,
     }
 
     impl KeystoreError for KeystoreListMockError {}
@@ -1577,7 +1577,7 @@ mod tests {
 
         let arti_pat = KeyPathPattern::Arti("*".to_string());
         let matching = mgr.list_matching(&arti_pat).unwrap();
-        // assert the unrecognized key has been filterd out
+        // assert the unrecognized key has been filtered out
         assert_eq!(matching.len(), 1);
         assert_eq!(
             matching.first().unwrap().key_path(),
