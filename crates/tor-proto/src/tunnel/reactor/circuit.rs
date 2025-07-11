@@ -18,7 +18,7 @@ use crate::crypto::handshake::ntor::{NtorClient, NtorPublicKey};
 use crate::crypto::handshake::ntor_v3::{NtorV3Client, NtorV3PublicKey};
 use crate::crypto::handshake::{ClientHandshake, KeyGenerator};
 use crate::memquota::{CircuitAccount, SpecificAccount as _, StreamAccount};
-use crate::stream::{AnyCmdChecker, StreamStatus};
+use crate::stream::{AnyCmdChecker, StreamRateLimit, StreamStatus};
 use crate::tunnel::circuit::celltypes::{ClientCircChanMsg, CreateResponse};
 use crate::tunnel::circuit::handshake::{BoxedClientLayer, HandshakeRole};
 use crate::tunnel::circuit::path;
@@ -51,6 +51,7 @@ use tor_memquota::mq_queue::{ChannelSpec as _, MpscSpec};
 
 use futures::{SinkExt as _, Stream};
 use oneshot_fused_workaround as oneshot;
+use postage::watch;
 use safelog::sensitive as sv;
 use tor_rtcompat::DynTimeProvider;
 use tracing::{debug, trace, warn};
@@ -411,6 +412,12 @@ impl Circuit {
         let stream_id = msg.stream_id();
         let circhop = self.hops.get_mut(hop).ok_or(Error::NoSuchHop)?;
 
+        // We might be out of capacity entirely; see if we are about to hit a limit.
+        //
+        // TODO: If we ever add a notion of _recoverable_ errors below, we'll
+        // need a way to restore this limit, and similarly for take_capacity_to_send().
+        circhop.decrement_outbound_cell_limit()?;
+
         // We need to apply stream-level flow control *before* encoding the message.
         if c_t_w {
             if let Some(stream_id) = stream_id {
@@ -521,6 +528,11 @@ impl Circuit {
         cell: Relay,
     ) -> Result<Vec<CircuitCmd>> {
         let (hopnum, tag, decode_res) = self.decode_relay_cell(cell)?;
+
+        // Check whether we are allowed to receive more data for this circuit hop.
+        self.hop_mut(hopnum)
+            .ok_or_else(|| internal!("nonexistent hop {:?}", hopnum))?
+            .decrement_inbound_cell_limit()?;
 
         let c_t_w = decode_res.cmds().any(sendme::cmd_counts_towards_windows);
 
@@ -847,8 +859,10 @@ impl Circuit {
             memquota.as_raw_account(),
         )?;
 
+        let (rate_limit_tx, rate_limit_rx) = watch::channel_with(StreamRateLimit::MAX);
+
         let cmd_checker = DataCmdChecker::new_connected();
-        hop.add_ent_with_id(sender, msg_rx, stream_id, cmd_checker)?;
+        hop.add_ent_with_id(sender, msg_rx, rate_limit_tx, stream_id, cmd_checker)?;
 
         let outcome = Pin::new(&mut handler.incoming_sender).try_send(StreamReqInfo {
             req,
@@ -856,6 +870,7 @@ impl Circuit {
             hop: (leg, hop_num).into(),
             msg_tx,
             receiver,
+            rate_limit_stream: rate_limit_rx,
             memquota,
             relay_cell_format,
         });
@@ -1342,6 +1357,7 @@ impl Circuit {
         message: AnyRelayMsg,
         sender: StreamMpscSender<UnparsedRelayMsg>,
         rx: StreamMpscReceiver<AnyRelayMsg>,
+        rate_limit_notifier: watch::Sender<StreamRateLimit>,
         cmd_checker: AnyCmdChecker,
     ) -> StdResult<Result<(SendRelayCell, StreamId)>, Bug> {
         let Some(hop) = self.hop_mut(hop_num) else {
@@ -1351,7 +1367,7 @@ impl Circuit {
             ));
         };
 
-        Ok(hop.begin_stream(message, sender, rx, cmd_checker))
+        Ok(hop.begin_stream(message, sender, rx, rate_limit_notifier, cmd_checker))
     }
 
     /// Close the specified stream

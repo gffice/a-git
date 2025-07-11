@@ -6,7 +6,7 @@ use crate::circuit::HopSettings;
 use crate::congestion::sendme;
 use crate::congestion::CongestionControl;
 use crate::crypto::cell::HopNum;
-use crate::stream::{AnyCmdChecker, StreamSendFlowControl, StreamStatus};
+use crate::stream::{AnyCmdChecker, StreamRateLimit, StreamSendFlowControl, StreamStatus};
 use crate::tunnel::circuit::{StreamMpscReceiver, StreamMpscSender};
 use crate::tunnel::streammap::{
     self, EndSentStreamEnt, OpenStreamEnt, ShouldSendEnd, StreamEntMut,
@@ -16,9 +16,10 @@ use crate::{Error, Result};
 
 use futures::stream::FuturesUnordered;
 use futures::Stream;
+use postage::watch;
 use safelog::sensitive as sv;
 use tor_cell::chancell::BoxedCellBody;
-use tor_cell::relaycell::msg::{AnyRelayMsg, Sendme};
+use tor_cell::relaycell::msg::AnyRelayMsg;
 use tor_cell::relaycell::{
     AnyRelayMsgOuter, RelayCellDecoder, RelayCellDecoderResult, RelayCellFormat, RelayCmd,
     RelayMsg, StreamId, UnparsedRelayMsg,
@@ -27,6 +28,7 @@ use tor_cell::relaycell::{
 use tor_error::{internal, Bug};
 use tracing::{trace, warn};
 
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::result::Result as StdResult;
 use std::sync::{Arc, Mutex};
@@ -214,6 +216,20 @@ pub(crate) struct CircHop {
     //
     // When we have packed/fragmented cells, this may be replaced by a RelayCellEncoder.
     relay_format: RelayCellFormat,
+
+    /// Remaining permitted incoming relay cells from this hop, plus 1.
+    ///
+    /// (In other words, `None` represents no limit,
+    /// `Some(1)` represents an exhausted limit,
+    /// and `Some(n)` means that n-1 more cells may be received.)
+    ///
+    /// If this ever decrements from Some(1), then the circuit must be torn down with an error.
+    n_incoming_cells_permitted: Option<NonZeroU32>,
+
+    /// Remaining permitted outgoing relay cells from this hop, plus 1.
+    ///
+    /// If this ever decrements from Some(1), then the circuit must be torn down with an error.
+    n_outgoing_cells_permitted: Option<NonZeroU32>,
 }
 
 impl CircHop {
@@ -224,6 +240,15 @@ impl CircHop {
         relay_format: RelayCellFormat,
         settings: &HopSettings,
     ) -> Self {
+        /// Convert a limit from the form used in a HopSettings to that used here.
+        /// (The format we use here is more compact.)
+        fn cvt(limit: u32) -> NonZeroU32 {
+            // See "known limitations" comment on n_incoming_cells_permitted.
+            limit
+                .saturating_add(1)
+                .try_into()
+                .expect("Adding one left it as zero?")
+        }
         CircHop {
             unique_id,
             hop_num,
@@ -231,6 +256,8 @@ impl CircHop {
             ccontrol: CongestionControl::new(&settings.ccontrol),
             inbound: RelayCellDecoder::new(relay_format),
             relay_format,
+            n_incoming_cells_permitted: settings.n_incoming_cells_permitted.map(cvt),
+            n_outgoing_cells_permitted: settings.n_outgoing_cells_permitted.map(cvt),
         }
     }
 
@@ -241,9 +268,10 @@ impl CircHop {
         message: AnyRelayMsg,
         sender: StreamMpscSender<UnparsedRelayMsg>,
         rx: StreamMpscReceiver<AnyRelayMsg>,
+        rate_limit_updater: watch::Sender<StreamRateLimit>,
         cmd_checker: AnyCmdChecker,
     ) -> Result<(SendRelayCell, StreamId)> {
-        let flow_ctrl = self.build_send_flow_ctrl();
+        let flow_ctrl = self.build_send_flow_ctrl(rate_limit_updater)?;
         let r =
             self.map
                 .lock()
@@ -336,6 +364,8 @@ impl CircHop {
     /// Take capacity to send `msg`.
     ///
     /// See [`OpenStreamEnt::take_capacity_to_send`].
+    //
+    // TODO prop340: This should take a cell or similar, not a message.
     pub(crate) fn take_capacity_to_send<M: RelayMsg>(
         &mut self,
         stream_id: StreamId,
@@ -363,6 +393,7 @@ impl CircHop {
         &self,
         sink: StreamMpscSender<UnparsedRelayMsg>,
         rx: StreamMpscReceiver<AnyRelayMsg>,
+        rate_limit_updater: watch::Sender<StreamRateLimit>,
         stream_id: StreamId,
         cmd_checker: AnyCmdChecker,
     ) -> Result<()> {
@@ -370,7 +401,7 @@ impl CircHop {
         hop_map.add_ent_with_id(
             sink,
             rx,
-            self.build_send_flow_ctrl(),
+            self.build_send_flow_ctrl(rate_limit_updater)?,
             stream_id,
             cmd_checker,
         )?;
@@ -468,12 +499,25 @@ impl CircHop {
     }
 
     /// Builds the (sending) flow control handler for a new stream.
-    fn build_send_flow_ctrl(&self) -> StreamSendFlowControl {
+    // TODO: remove the `Result` once we remove the "flowctl-cc" feature
+    #[cfg_attr(feature = "flowctl-cc", expect(clippy::unnecessary_wraps))]
+    fn build_send_flow_ctrl(
+        &self,
+        rate_limit_updater: watch::Sender<StreamRateLimit>,
+    ) -> Result<StreamSendFlowControl> {
         if self.ccontrol.uses_stream_sendme() {
             let window = sendme::StreamSendWindow::new(SEND_WINDOW_INIT);
-            StreamSendFlowControl::new_window_based(window)
+            Ok(StreamSendFlowControl::new_window_based(window))
         } else {
-            StreamSendFlowControl::new_xon_xoff_based()
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "flowctl-cc")] {
+                    Ok(StreamSendFlowControl::new_xon_xoff_based(rate_limit_updater))
+                } else {
+                    Err(internal!(
+                        "`CongestionControl` doesn't use sendmes, but 'flowctl-cc' feature not enabled",
+                    ).into())
+                }
+            }
         }
     }
 
@@ -489,17 +533,25 @@ impl CircHop {
 
         // The stream for this message exists, and is open.
 
-        if msg.cmd() == RelayCmd::SENDME {
-            let _sendme = msg
-                .decode::<Sendme>()
-                .map_err(|e| Error::from_bytes_err(e, "Sendme message on stream"))?
-                .into_msg();
-
-            // We need to handle sendmes here, not in the stream's
-            // recv() method, or else we'd never notice them if the
-            // stream isn't reading.
-            ent.put_for_incoming_sendme()?;
-            return Ok(false);
+        // We need to handle SENDME/XON/XOFF messages here, not in the stream's recv() method, or
+        // else we'd never notice them if the stream isn't reading.
+        //
+        // TODO: this logic is the same as `HalfStream::handle_msg`; we should refactor this if
+        // possible
+        match msg.cmd() {
+            RelayCmd::SENDME => {
+                ent.put_for_incoming_sendme(msg)?;
+                return Ok(false);
+            }
+            RelayCmd::XON => {
+                ent.handle_incoming_xon(msg)?;
+                return Ok(false);
+            }
+            RelayCmd::XOFF => {
+                ent.handle_incoming_xoff(msg)?;
+                return Ok(false);
+            }
+            _ => {}
         }
 
         let message_closes_stream = ent.cmd_checker.check_msg(&msg)? == StreamStatus::Closed;
@@ -544,5 +596,38 @@ impl CircHop {
         self.map = map;
 
         Ok(())
+    }
+
+    /// Decrement the limit of outbound cells that may be sent to this hop; give
+    /// an error if it would reach zero.
+    pub(crate) fn decrement_outbound_cell_limit(&mut self) -> Result<()> {
+        try_decrement_cell_limit(&mut self.n_outgoing_cells_permitted)
+            .map_err(|_| Error::ExcessOutboundCells)
+    }
+
+    /// Decrement the limit of inbound cells that may be received from this hop; give
+    /// an error if it would reach zero.
+    pub(crate) fn decrement_inbound_cell_limit(&mut self) -> Result<()> {
+        try_decrement_cell_limit(&mut self.n_incoming_cells_permitted)
+            .map_err(|_| Error::ExcessInboundCells)
+    }
+}
+
+/// If `val` is `Some(1)`, return Err(());
+/// otherwise decrement it (if it is Some) and return Ok(()).
+#[inline]
+fn try_decrement_cell_limit(val: &mut Option<NonZeroU32>) -> StdResult<(), ()> {
+    // This is a bit verbose, but I've confirmed that it optimizes nicely.
+    match val {
+        Some(x) => {
+            let z = u32::from(*x);
+            if z == 1 {
+                Err(())
+            } else {
+                *x = (z - 1).try_into().expect("NonZeroU32 was zero?!");
+                Ok(())
+            }
+        }
+        None => Ok(()),
     }
 }

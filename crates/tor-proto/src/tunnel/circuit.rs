@@ -53,7 +53,7 @@ use crate::crypto::handshake::ntor_v3::NtorV3PublicKey;
 use crate::memquota::{CircuitAccount, SpecificAccount as _};
 use crate::stream::{
     AnyCmdChecker, DataCmdChecker, DataStream, ResolveCmdChecker, ResolveStream, StreamParameters,
-    StreamReceiver,
+    StreamRateLimit, StreamReceiver,
 };
 use crate::tunnel::circuit::celltypes::*;
 use crate::tunnel::reactor::CtrlCmd;
@@ -65,6 +65,7 @@ use crate::util::skew::ClockSkew;
 use crate::{Error, ResolveError, Result};
 use educe::Educe;
 use path::HopDetail;
+use postage::watch;
 use tor_cell::{
     chancell::CircId,
     relaycell::msg::{AnyRelayMsg, Begin, Resolve, Resolved, ResolvedVal},
@@ -408,6 +409,33 @@ pub struct CircParameters {
     pub extend_by_ed25519_id: bool,
     /// Congestion control parameters for this circuit.
     pub ccontrol: CongestionControlParams,
+
+    /// Maximum number of permitted incoming relay cells for each hop.
+    ///
+    /// If we would receive more relay cells than this from a single hop,
+    /// we close the circuit with [`ExcessInboundCells`](Error::ExcessInboundCells).
+    ///
+    /// If this value is None, then there is no limit to the number of inbound cells.
+    ///
+    /// Known limitation: If this value if `u32::MAX`,
+    /// then a limit of `u32::MAX - 1` is enforced.
+    pub n_incoming_cells_permitted: Option<u32>,
+
+    /// Maximum number of permitted outgoing relay cells for each hop.
+    ///
+    /// If we would try to send more relay cells than this from a single hop,
+    /// we close the circuit with [`ExcessOutboundCells`](Error::ExcessOutboundCells).
+    /// It is the circuit-user's responsibility to make sure that this does not happen.
+    ///
+    /// This setting is used to ensure that we do not violate a limit
+    /// imposed by `n_incoming_cells_permitted`
+    /// on the other side of a circuit.
+    ///
+    /// If this value is None, then there is no limit to the number of outbound cells.
+    ///
+    /// Known limitation: If this value if `u32::MAX`,
+    /// then a limit of `u32::MAX - 1` is enforced.
+    pub n_outgoing_cells_permitted: Option<u32>,
 }
 
 /// The settings we use for single hop of a circuit.
@@ -425,6 +453,12 @@ pub struct CircParameters {
 pub(super) struct HopSettings {
     /// The negotiated congestion control settings for this circuit.
     pub(super) ccontrol: CongestionControlParams,
+
+    /// Maximum number of permitted incoming relay cells for this hop.
+    pub(super) n_incoming_cells_permitted: Option<u32>,
+
+    /// Maximum number of permitted outgoing relay cells for this hop.
+    pub(super) n_outgoing_cells_permitted: Option<u32>,
 }
 
 impl HopSettings {
@@ -444,6 +478,8 @@ impl HopSettings {
     ) -> Result<Self> {
         let mut settings = Self {
             ccontrol: params.ccontrol.clone(),
+            n_incoming_cells_permitted: params.n_incoming_cells_permitted,
+            n_outgoing_cells_permitted: params.n_outgoing_cells_permitted,
         };
 
         match settings.ccontrol.alg() {
@@ -477,6 +513,8 @@ impl std::default::Default for CircParameters {
         Self {
             extend_by_ed25519_id: true,
             ccontrol: crate::congestion::test_utils::params::build_cc_fixed_params(),
+            n_incoming_cells_permitted: None,
+            n_outgoing_cells_permitted: None,
         }
     }
 }
@@ -487,6 +525,8 @@ impl CircParameters {
         Self {
             extend_by_ed25519_id,
             ccontrol,
+            n_incoming_cells_permitted: None,
+            n_outgoing_cells_permitted: None,
         }
     }
 }
@@ -505,6 +545,27 @@ impl ClientCirc {
             .first_hop(self.unique_id)
             .map_err(|_| Error::CircuitClosed)?
             .expect("called first_hop on an un-constructed circuit"))
+    }
+
+    /// Return a description of the last hop of the circuit.
+    ///
+    /// Return None if the last hop is virtual.
+    ///
+    /// See caveats on [`ClientCirc::last_hop_num()`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if there is no last hop.  (This should be impossible outside of
+    /// the tor-proto crate, but within the crate it's possible to have a
+    /// circuit with no hops.)
+    pub fn last_hop_info(&self) -> Result<Option<OwnedChanTarget>> {
+        let path = self.path_ref()?;
+        Ok(path
+            .hops()
+            .last()
+            .expect("Called last_hop an an un-constructed circuit")
+            .as_chan_target()
+            .map(OwnedChanTarget::from_chan_target))
     }
 
     /// Return the [`HopNum`] of the last hop of this circuit.
@@ -770,6 +831,7 @@ impl ClientCirc {
                 hop,
                 receiver,
                 msg_tx,
+                rate_limit_stream,
                 memquota,
                 relay_cell_format,
             } = req_ctx;
@@ -792,6 +854,7 @@ impl ClientCirc {
                 hop: allowed_hop_loc,
                 stream_id,
                 relay_cell_format,
+                rate_limit_stream,
             };
 
             let reader = StreamReceiver {
@@ -992,12 +1055,15 @@ impl ClientCirc {
         let (msg_tx, msg_rx) =
             MpscSpec::new(CIRCUIT_BUFFER_SIZE).new_mq(time_prov, memquota.as_raw_account())?;
 
+        let (rate_limit_tx, rate_limit_rx) = watch::channel_with(StreamRateLimit::MAX);
+
         self.control
             .unbounded_send(CtrlMsg::BeginStream {
                 hop,
                 message: begin_msg,
                 sender,
                 rx: msg_rx,
+                rate_limit_notifier: rate_limit_tx,
                 done: tx,
                 cmd_checker,
             })
@@ -1011,6 +1077,7 @@ impl ClientCirc {
             hop,
             stream_id,
             relay_cell_format,
+            rate_limit_stream: rate_limit_rx,
         };
 
         let stream_receiver = StreamReceiver {
