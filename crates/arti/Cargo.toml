@@ -2,7 +2,7 @@
 name = "arti"
 version = "1.4.6"
 authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
-edition = "2021"
+edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 homepage = "https://gitlab.torproject.org/tpo/core/arti/-/wikis/home"
@@ -89,6 +89,11 @@ hs-pow-full = ["arti-client/hs-pow-full", "__is_experimental"]
 pt-client = ["bridge-client", "arti-client/pt-client"]
 ctor-keystore = ["arti-client/ctor-keystore", "__is_experimental"]
 flowctl-cc = ["arti-client/flowctl-cc", "__is_experimental"]
+counter-galois-onion = [
+    "arti-client/counter-galois-onion",
+    "flowctl-cc",
+    "__is_experimental",
+]
 
 rpc = ["arti-rpcserver", "tor-rpcbase", "tor-rpc-connect", "derive-deftly"]
 
@@ -129,6 +134,7 @@ experimental = [
     "ctor-keystore",
     "onion-service-cli-extra",
     "flowctl-cc",
+    "counter-galois-onion",
 ]
 metrics = [
     "dep:metrics-exporter-prometheus",

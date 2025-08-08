@@ -6,17 +6,18 @@
 //! TODO: I have zero confidence in the close-and-cleanup behavior here,
 //! or in the error handling behavior.
 
-use super::circmap::{CircEnt, CircMap};
 use super::OpenChanCellS2C;
+use super::circmap::{CircEnt, CircMap};
 use crate::channel::OpenChanMsgS2C;
 use crate::tunnel::circuit::halfcirc::HalfCirc;
 use crate::util::err::ReactorError;
 use crate::util::oneshot_broadcast;
 use crate::{Error, Result};
 use tor_async_utils::SinkPrepareExt as _;
-use tor_cell::chancell::msg::{Destroy, DestroyReason, PaddingNegotiate};
 use tor_cell::chancell::ChanMsg;
-use tor_cell::chancell::{msg::AnyChanMsg, AnyChanCell, CircId};
+use tor_cell::chancell::msg::{Destroy, DestroyReason, PaddingNegotiate};
+use tor_cell::chancell::{AnyChanCell, CircId, msg::AnyChanMsg};
+use tor_error::debug_report;
 use tor_memquota::mq_queue;
 use tor_rtcompat::SleepProvider;
 
@@ -28,10 +29,10 @@ use tor_rtcompat::StreamOps;
 use futures::channel::mpsc;
 use oneshot_fused_workaround as oneshot;
 
-use futures::sink::SinkExt;
-use futures::stream::Stream;
 use futures::Sink;
 use futures::StreamExt as _;
+use futures::sink::SinkExt;
+use futures::stream::Stream;
 use futures::{select, select_biased};
 use tor_error::internal;
 
@@ -40,9 +41,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::channel::{
-    codec::CodecError, kist::KistParams, padding, params::*, unique_id, ChannelDetails, CloseInfo,
+    ChannelDetails, CloseInfo, codec::CodecError, kist::KistParams, padding, params::*, unique_id,
 };
-use crate::tunnel::circuit::{celltypes::CreateResponse, CircuitRxSender};
+use crate::tunnel::circuit::{CircuitRxSender, celltypes::CreateResponse};
 use tracing::{debug, trace};
 
 /// A boxed trait object that can provide `ChanCell`s.
@@ -195,7 +196,15 @@ impl<S: SleepProvider> Reactor<S> {
                 Err(ReactorError::Err(e)) => break Err(e),
             }
         };
-        debug!(channel_id = %self, "Reactor stopped");
+
+        // Log that the reactor stopped, possibly with the associated error as a report.
+        // May log at a higher level depending on the error kind.
+        const MSG: &str = "Reactor stopped";
+        match &result {
+            Ok(()) => debug!("{self}: {MSG}"),
+            Err(e) => debug_report!(e, "{}: {}", self, MSG),
+        }
+
         // Inform any waiters that the channel has closed.
         let close_msg = result.as_ref().map_err(Clone::clone).map(|()| CloseInfo);
         self.reactor_closed_tx.send(close_msg);
