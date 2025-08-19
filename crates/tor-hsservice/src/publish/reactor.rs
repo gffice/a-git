@@ -332,7 +332,7 @@ pub(crate) trait MockableDirTunnel: Send + Sync {
 
 #[async_trait]
 impl MockableDirTunnel for ServiceOnionServiceDirTunnel {
-    type DataStream = tor_proto::stream::DataStream;
+    type DataStream = tor_proto::client::stream::DataStream;
 
     async fn begin_dir_stream(&self) -> Result<Self::DataStream, tor_circmgr::Error> {
         Self::begin_dir_stream(self).await
@@ -1805,7 +1805,7 @@ impl<R: Runtime, M: Mockable> Reactor<R, M> {
                     // to do a traffic tagging attack via hsdir inflation.
                     // (See proposal 360.)
                     warn_report!(
-                        &e.clone(),
+                        e,
                         "Suspicious error while uploading descriptor to {}/{}",
                         ed_id,
                         rsa_id
