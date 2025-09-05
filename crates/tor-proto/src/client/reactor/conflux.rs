@@ -1,7 +1,7 @@
 //! Conflux-related functionality
 
 #[cfg(feature = "conflux")]
-mod msghandler;
+pub(crate) mod msghandler;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -18,30 +18,31 @@ use tracing::{info, trace, warn};
 
 use tor_async_utils::SinkPrepareExt as _;
 use tor_basic_utils::flatten;
-use tor_cell::relaycell::{AnyRelayMsgOuter, RelayCmd};
+use tor_cell::relaycell::AnyRelayMsgOuter;
 use tor_error::{Bug, bad_api_usage, internal};
 use tor_linkspec::HasRelayIds as _;
 
 use crate::circuit::UniqId;
 use crate::client::circuit::TunnelMutableState;
 use crate::client::circuit::path::HopDetail;
-use crate::client::reactor::circuit::ConfluxStatus;
 use crate::client::streammap;
+use crate::conflux::cmd_counts_towards_seqno;
+use crate::conflux::msghandler::{ConfluxStatus, RemoveLegReason};
+use crate::congestion::params::CongestionWindowParams;
 use crate::crypto::cell::HopNum;
 use crate::tunnel::TunnelId;
 use crate::util::err::ReactorError;
 
 use super::circuit::CircHop;
-use super::{Circuit, CircuitAction, RemoveLegReason, SendRelayCell};
+use super::{Circuit, CircuitAction, SendRelayCell};
 
 #[cfg(feature = "conflux")]
 use {
+    crate::conflux::msghandler::ConfluxMsgHandler,
+    msghandler::ClientConfluxMsgHandler,
     tor_cell::relaycell::conflux::{V1DesiredUx, V1LinkPayload, V1Nonce},
     tor_cell::relaycell::msg::{ConfluxLink, ConfluxSwitch},
 };
-
-#[cfg(feature = "conflux")]
-pub(crate) use msghandler::{ConfluxAction, ConfluxMsgHandler, OooRelayMsg};
 
 /// The maximum number of conflux legs to store in the conflux set SmallVec.
 ///
@@ -551,18 +552,22 @@ impl ConfluxSet {
             self.mutable.insert(unique_id, mutable);
         }
 
+        let cwnd_params = self.cwnd_params()?;
         for circ in self.legs.iter_mut() {
             // The circuits that have a None status don't know they're part of
             // a multi-path tunnel yet. They need to be initialized with a
             // conflux message handler, and have their join point fixed up
             // to share a stream map with the join point on all the other circuits.
             if circ.conflux_status().is_none() {
-                let conflux_handler = ConfluxMsgHandler::new_client(
+                let handler = Box::new(ClientConfluxMsgHandler::new(
                     join_point.hop,
                     self.nonce,
                     Arc::clone(&self.last_seq_delivered),
+                    cwnd_params,
                     runtime.clone(),
-                );
+                ));
+                let conflux_handler =
+                    ConfluxMsgHandler::new(handler, Arc::clone(&self.last_seq_delivered));
 
                 circ.add_to_conflux_tunnel(self.tunnel_id, conflux_handler);
 
@@ -575,6 +580,33 @@ impl ConfluxSet {
         }
 
         Ok(())
+    }
+
+    /// Get the [`CongestionWindowParams`] of the join point
+    /// on the first leg.
+    ///
+    /// Returns an error if the congestion control algorithm
+    /// doesn't have a congestion control window object,
+    /// or if the conflux set is empty, or the joint point hop
+    /// does not exist.
+    ///
+    // TODO: this function is a bit of a hack. In reality, we only
+    // need the cc_cwnd_init parameter (for SWITCH seqno validation).
+    // The fact that we obtain it from the cc params of the join point
+    // is an implementation detail (it's a workaround for the fact that
+    // at this point, these params can only obtained from a CircHop)
+    #[cfg(feature = "conflux")]
+    fn cwnd_params(&self) -> Result<CongestionWindowParams, Bug> {
+        let primary_leg = self
+            .leg(self.primary_id)
+            .ok_or_else(|| internal!("no primary leg?!"))?;
+        let join_point = self.join_point_hop(primary_leg)?;
+        let ccontrol = join_point.ccontrol();
+        let cwnd = ccontrol
+            .cwnd()
+            .ok_or_else(|| internal!("congestion control algorithm does not track the cwnd?!"))?;
+
+        Ok(*cwnd.params())
     }
 
     /// Try to update the primary leg based on the configured desired UX,
@@ -1141,57 +1173,6 @@ impl<I: Iterator> From<ExactlyOneError<I>> for NotSingleLegError {
         // TODO: cannot wrap the ExactlyOneError with into_bad_api_usage
         // because it's not Send + Sync
         Self(bad_api_usage!("not a single leg conflux set ({e})"))
-    }
-}
-
-/// Whether the specified `cmd` counts towards the conflux sequence numbers.
-fn cmd_counts_towards_seqno(cmd: RelayCmd) -> bool {
-    // Note: copy-pasted from c-tor
-    match cmd {
-        // These are all fine to multiplex, and must be so that ordering is preserved
-        RelayCmd::BEGIN | RelayCmd::DATA | RelayCmd::END | RelayCmd::CONNECTED => true,
-
-        // We can't multiplex these because they are circuit-specific
-        RelayCmd::SENDME
-        | RelayCmd::EXTEND
-        | RelayCmd::EXTENDED
-        | RelayCmd::TRUNCATE
-        | RelayCmd::TRUNCATED
-        | RelayCmd::DROP => false,
-
-        //  We must multiplex RESOLVEs because their ordering impacts begin/end.
-        RelayCmd::RESOLVE | RelayCmd::RESOLVED => true,
-
-        // These are all circuit-specific
-        RelayCmd::BEGIN_DIR
-        | RelayCmd::EXTEND2
-        | RelayCmd::EXTENDED2
-        | RelayCmd::ESTABLISH_INTRO
-        | RelayCmd::ESTABLISH_RENDEZVOUS
-        | RelayCmd::INTRODUCE1
-        | RelayCmd::INTRODUCE2
-        | RelayCmd::RENDEZVOUS1
-        | RelayCmd::RENDEZVOUS2
-        | RelayCmd::INTRO_ESTABLISHED
-        | RelayCmd::RENDEZVOUS_ESTABLISHED
-        | RelayCmd::INTRODUCE_ACK
-        | RelayCmd::PADDING_NEGOTIATE
-        | RelayCmd::PADDING_NEGOTIATED => false,
-
-        // Flow control cells must be ordered (see prop 329).
-        RelayCmd::XOFF | RelayCmd::XON => true,
-
-        // These two are not multiplexed, because they must be processed immediately
-        // to update sequence numbers before any other cells are processed on the circuit
-        RelayCmd::CONFLUX_SWITCH
-        | RelayCmd::CONFLUX_LINK
-        | RelayCmd::CONFLUX_LINKED
-        | RelayCmd::CONFLUX_LINKED_ACK => false,
-
-        _ => {
-            tracing::warn!("Conflux asked to multiplex unknown relay command {cmd}");
-            false
-        }
     }
 }
 
