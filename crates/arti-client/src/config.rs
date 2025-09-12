@@ -44,11 +44,12 @@ pub mod circ {
 /// Types for configuring how Tor accesses its directory information.
 pub mod dir {
     pub use tor_dircommon::authority::{Authority, AuthorityBuilder};
-    pub use tor_dirmgr::{
-        DirMgrConfig, DirTolerance, DirToleranceBuilder, DownloadSchedule, DownloadScheduleConfig,
-        DownloadScheduleConfigBuilder, FallbackDir, FallbackDirBuilder, NetworkConfig,
-        NetworkConfigBuilder,
+    pub use tor_dircommon::config::{
+        DirTolerance, DirToleranceBuilder, DownloadScheduleConfig, DownloadScheduleConfigBuilder,
+        NetworkConfig, NetworkConfigBuilder,
     };
+    pub use tor_dircommon::retry::{DownloadSchedule, DownloadScheduleBuilder};
+    pub use tor_dirmgr::{DirMgrConfig, FallbackDir, FallbackDirBuilder};
 }
 
 /// Types for configuring pluggable transports.
@@ -739,8 +740,8 @@ impl tor_circmgr::hspool::HsCircPoolConfig for TorClientConfig {
     }
 }
 
-impl AsRef<tor_guardmgr::fallback::FallbackList> for TorClientConfig {
-    fn as_ref(&self) -> &tor_guardmgr::fallback::FallbackList {
+impl AsRef<tor_dircommon::fallback::FallbackList> for TorClientConfig {
+    fn as_ref(&self) -> &tor_dircommon::fallback::FallbackList {
         self.tor_network.fallback_caches()
     }
 }

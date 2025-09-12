@@ -204,6 +204,7 @@ dependencies = [
 name = "arti"
 version = "1.5.0"
 dependencies = [
+ "amplify",
  "anyhow",
  "arti-client",
  "arti-rpcserver",
@@ -262,6 +263,7 @@ dependencies = [
  "tracing-subscriber",
  "trycmd",
  "visibility",
+ "walkdir",
  "winapi",
 ]
 
@@ -2589,6 +2591,18 @@ dependencies = [
  "r-efi",
  "wasi 0.14.2+wasi-0.2.4",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "getset"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cf0fc11e47561d47397154977bc219f4cf809b2974facc3ccb3b89e2436f912"
+dependencies = [
+ "proc-macro-error2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
 ]
 
 [[package]]
@@ -6152,6 +6166,7 @@ dependencies = [
  "tor-cell",
  "tor-chanmgr",
  "tor-config",
+ "tor-dircommon",
  "tor-error",
  "tor-geoip",
  "tor-guardmgr",
@@ -6269,9 +6284,16 @@ dependencies = [
 name = "tor-dircommon"
 version = "0.34.0"
 dependencies = [
+ "base64ct",
  "derive_builder_fork_arti",
+ "getset",
+ "humantime",
+ "humantime-serde",
  "serde",
+ "tor-basic-utils",
+ "tor-checkable",
  "tor-config",
+ "tor-linkspec",
  "tor-llcrypto",
  "tor-netdoc",
 ]
@@ -6447,6 +6469,7 @@ dependencies = [
  "tor-async-utils",
  "tor-basic-utils",
  "tor-config",
+ "tor-dircommon",
  "tor-error",
  "tor-linkspec",
  "tor-llcrypto",
