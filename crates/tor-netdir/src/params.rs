@@ -269,11 +269,7 @@ pub struct NetParameters {
 
     /// Specifies which congestion control algorithm clients should use.
     /// Current values are 0 for the fixed window algorithm and 2 for Vegas.
-    ///
-    /// TODO: Flip this to 2 once CC circuit negotiation and Flow Control is in which would be the
-    /// same default as C-tor. Reason is that we can't have it to 2 for now else it makes the
-    /// consensus download fails.
-    pub cc_alg: BoundedInt32<0, 2> = (0)
+    pub cc_alg: BoundedInt32<0, 2> = (2)
         from "cc_alg",
 
     /// Vegas only. This parameter defines the integer number of 'cc_sendme_inc' multiples
@@ -367,6 +363,39 @@ pub struct NetParameters {
     /// congestion window increments are reduced. The MAX disables RFC3742.
     pub cc_vegas_sscap_onion: BoundedInt32<100, { i32::MAX }> = (475)
         from "cc_sscap_onion",
+
+    // Stream flow control parameters.
+    // TODO: There is a `circwindow` for circuit flow control, but is there a similar package window
+    // parameter for pre-cc stream flow control?
+
+    /// The outbuf length, in relay cell multiples, before we send an XOFF.
+    /// Used by clients (including onion services).
+    ///
+    /// See prop 324.
+    pub cc_xoff_client: BoundedInt32<1, 10_000> = (500)
+        from "cc_xoff_client",
+    /// The outbuf length, in relay cell multiples, before we send an XOFF.
+    /// Used by exits.
+    ///
+    /// See prop 324.
+    pub cc_xoff_exit: BoundedInt32<1, 10_000> = (500)
+        from "cc_xoff_exit",
+    /// Specifies how many full packed cells of bytes must arrive before we can compute a rate,
+    /// as well as how often we can send XONs.
+    ///
+    /// See prop 324.
+    pub cc_xon_rate: BoundedInt32<1, 5000> = (500)
+        from "cc_xon_rate",
+    /// Specifies how much the edge drain rate can change before we send another advisory cell.
+    ///
+    /// See prop 324.
+    pub cc_xon_change_pct: BoundedInt32<1, 99> = (25)
+        from "cc_xon_change_pct",
+    /// Specifies the `N` in the `N_EWMA` of rates.
+    ///
+    /// See prop 324.
+    pub cc_xon_ewma_cnt: BoundedInt32<2, 100> = (2)
+        from "cc_xon_ewma_cnt",
 
     /// The maximum cell window size?
     pub circuit_window: BoundedInt32<100, 1000> = (1_000)

@@ -36,7 +36,6 @@ use crate::crypto::handshake::ntor_v3::{NtorV3Client, NtorV3PublicKey};
 use crate::crypto::handshake::{ClientHandshake, KeyGenerator};
 use crate::memquota::{CircuitAccount, SpecificAccount as _, StreamAccount};
 use crate::tunnel::TunnelScopedCircId;
-use crate::util::SinkExt as _;
 use crate::util::err::ReactorError;
 use crate::util::notify::NotifySender;
 use crate::{ClockSkew, Error, Result};
@@ -72,7 +71,6 @@ use std::borrow::Borrow;
 use std::pin::Pin;
 use std::result::Result as StdResult;
 use std::sync::Arc;
-use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 use create::{Create2Wrap, CreateFastWrap, CreateHandshakeWrap};
@@ -569,7 +567,7 @@ impl Circuit {
         let (hopnum, tag, decode_res) = self.decode_relay_cell(cell)?;
 
         if decode_res.is_padding() {
-            self.padding_ctrl.decrypted_padding(hopnum);
+            self.padding_ctrl.decrypted_padding(hopnum)?;
         } else {
             self.padding_ctrl.decrypted_data(hopnum);
         }
@@ -1272,6 +1270,17 @@ impl Circuit {
             return Ok(Some(CircuitCmd::CleanShutdown));
         }
 
+        if msg.cmd() == RelayCmd::DROP {
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "circ-padding")] {
+                    return Ok(None);
+                } else {
+                    use crate::util::err::ExcessPadding;
+                    return Err(Error::ExcessPadding(ExcessPadding::NoPaddingNegotiated, hopnum));
+                }
+            }
+        }
+
         trace!(circ_id = %self.unique_id, cell = ?msg, "Received meta-cell");
 
         #[cfg(feature = "conflux")]
@@ -1408,21 +1417,6 @@ impl Circuit {
         exclude: Option<HopNum>,
     ) -> impl Stream<Item = Result<CircuitCmd>> + use<> {
         self.hops.ready_streams_iterator(exclude)
-    }
-
-    /// Return the congestion signals for this reactor. This is used by congestion control module.
-    ///
-    /// Note: This is only async because we need a Context to check the sink for readiness.
-    /// This will register a new waker (or overwrite any existing waker).
-    pub(super) async fn congestion_signals(&mut self) -> CongestionSignals {
-        futures::future::poll_fn(|cx| -> Poll<CongestionSignals> {
-            let channel_is_ready = self.chan_sender.poll_ready_unpin_bool(cx).unwrap_or(false);
-            Poll::Ready(CongestionSignals::new(
-                /* channel_blocked= */ !channel_is_ready,
-                self.chan_sender.n_queued(),
-            ))
-        })
-        .await
     }
 
     /// Return a reference to the hop corresponding to `hopnum`, if there is one.
@@ -1588,7 +1582,8 @@ impl Circuit {
         use padding::Replace::*;
 
         // If true, and we are trying to send Replaceable padding,
-        // we should let the data in the queue count as the queued padding instead.
+        // we should let any data in the queue count as the queued padding instead,
+        // if it is queued for our target hop (or any subsequent hop).
         //
         // TODO circpad: In addition to letting currently-queued data count as padding,
         // maybenot also permits us to send currently pending data from our streams
@@ -1597,7 +1592,9 @@ impl Circuit {
         // TODO circpad: This will usually be false, since we try not to queue data
         // when there isn't space to write it.  If we someday add internal per-circuit
         // Buffers to chan_sender, this test is more likely to trigger.
-        let have_queued_data = self.chan_sender.n_queued() > 0;
+        let have_queued_cell_for_hop = self
+            .chan_sender
+            .have_queued_cell_for_hop_or_later(send_padding.hop);
 
         match &self.padding_block {
             Some(blocking) if blocking.is_bypassable => {
@@ -1608,15 +1605,14 @@ impl Circuit {
                     (NotReplaceable, DoNotBypass) => QueuePaddingNormally,
                     (NotReplaceable, BypassBlocking) => QueuePaddingAndBypass,
                     (Replaceable, DoNotBypass) => {
-                        if have_queued_data {
-                            // The queued item will count as padding.
-                            NothingToDo
+                        if have_queued_cell_for_hop {
+                            TreatQueuedCellAsPadding
                         } else {
                             QueuePaddingNormally
                         }
                     }
                     (Replaceable, BypassBlocking) => {
-                        if have_queued_data {
+                        if have_queued_cell_for_hop {
                             BypassWithExistingQueue
                         } else {
                             QueuePaddingAndBypass
@@ -1624,19 +1620,16 @@ impl Circuit {
                     }
                 }
             }
-            Some(_) | None => {
-                match send_padding.may_replace_with_data() {
-                    Replaceable => {
-                        if have_queued_data {
-                            // The queued item will count as padding.
-                            NothingToDo
-                        } else {
-                            QueuePaddingNormally
-                        }
+            Some(_) | None => match send_padding.may_replace_with_data() {
+                Replaceable => {
+                    if have_queued_cell_for_hop {
+                        TreatQueuedCellAsPadding
+                    } else {
+                        QueuePaddingNormally
                     }
-                    NotReplaceable => QueuePaddingNormally,
                 }
-            }
+                NotReplaceable => QueuePaddingNormally,
+            },
         }
     }
 
@@ -1660,21 +1653,13 @@ impl Circuit {
                     .await?;
             }
             BypassWithExistingQueue => {
-                // TODO circpad: Is this correct? We didn't really queue anything;
-                // we only took an already-queued cell (possibly padding, possibly not)
-                // and decided that it counts as padding.
-                let _queue_info = self
-                    .padding_ctrl
-                    .queued_data_as_padding(target_hop, send_padding);
+                self.padding_ctrl
+                    .replaceable_padding_already_queued(target_hop, send_padding);
                 self.chan_sender.bypass_blocking_once();
             }
-            NothingToDo => {
-                // TODO circpad: Is this correct? We didn't really queue anything;
-                // we only took an already-queued cell (possibly padding, possibly not)
-                // and decided that it counts as padding.
-                let _queue_info = self
-                    .padding_ctrl
-                    .queued_data_as_padding(target_hop, send_padding);
+            TreatQueuedCellAsPadding => {
+                self.padding_ctrl
+                    .replaceable_padding_already_queued(target_hop, send_padding);
             }
         }
         Ok(())
@@ -1725,7 +1710,7 @@ enum CircPaddingDisposition {
     BypassWithExistingQueue,
     /// Do not take any actual padding action:
     /// existing data on our outbound queue will count as padding.
-    NothingToDo,
+    TreatQueuedCellAsPadding,
 }
 
 /// Return the stream ID of `msg`, if it has one.
