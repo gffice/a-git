@@ -4,7 +4,9 @@ use super::CircuitCmd;
 use super::{CloseStreamBehavior, SEND_WINDOW_INIT, SendRelayCell};
 use crate::client::circuit::{HopSettings, StreamMpscReceiver};
 use crate::client::stream::flow_ctrl::params::FlowCtrlParameters;
-use crate::client::stream::flow_ctrl::state::{StreamFlowCtrl, StreamRateLimit};
+use crate::client::stream::flow_ctrl::state::{
+    StreamEndpointType, StreamFlowCtrl, StreamRateLimit,
+};
 use crate::client::stream::flow_ctrl::xon_xoff::reader::DrainRateRequest;
 use crate::client::stream::queue::StreamQueueSender;
 use crate::client::stream::{AnyCmdChecker, StreamStatus};
@@ -27,7 +29,7 @@ use tor_cell::relaycell::flow_ctrl::{Xoff, Xon, XonKbpsEwma};
 use tor_cell::relaycell::msg::AnyRelayMsg;
 use tor_cell::relaycell::{
     AnyRelayMsgOuter, RelayCellDecoder, RelayCellDecoderResult, RelayCellFormat, RelayCmd,
-    RelayMsg, StreamId, UnparsedRelayMsg,
+    StreamId, UnparsedRelayMsg,
 };
 
 use tor_error::{Bug, internal};
@@ -219,7 +221,7 @@ pub(crate) struct CircHop {
     // TODO: It's unfortunate that all circuit hops need to hold on to this when they're likely the
     // same for all circuits. It would be nice if this could be in an `Arc`, and each circuit just
     // holds a reference to this `Arc`.
-    flow_ctrl_params: FlowCtrlParameters,
+    flow_ctrl_params: Arc<FlowCtrlParameters>,
     /// Decodes relay cells received from this hop.
     inbound: RelayCellDecoder,
     /// Format to use for relay cells.
@@ -264,7 +266,7 @@ impl CircHop {
             hop_num,
             map: Arc::new(Mutex::new(streammap::StreamMap::new())),
             ccontrol: CongestionControl::new(&settings.ccontrol),
-            flow_ctrl_params: settings.flow_ctrl_params.clone(),
+            flow_ctrl_params: Arc::new(settings.flow_ctrl_params.clone()),
             inbound: RelayCellDecoder::new(relay_format),
             relay_format,
             n_incoming_cells_permitted: settings.n_incoming_cells_permitted.map(cvt),
@@ -284,7 +286,7 @@ impl CircHop {
         cmd_checker: AnyCmdChecker,
     ) -> Result<(SendRelayCell, StreamId)> {
         let flow_ctrl = self.build_flow_ctrl(
-            &self.flow_ctrl_params,
+            Arc::clone(&self.flow_ctrl_params),
             rate_limit_updater,
             drain_rate_requester,
         )?;
@@ -419,16 +421,12 @@ impl CircHop {
         self.relay_format
     }
 
-    /// Take capacity to send `msg`.
+    /// We're about to send `msg`.
     ///
-    /// See [`OpenStreamEnt::take_capacity_to_send`].
+    /// See [`OpenStreamEnt::about_to_send`].
     //
     // TODO prop340: This should take a cell or similar, not a message.
-    pub(crate) fn take_capacity_to_send<M: RelayMsg>(
-        &mut self,
-        stream_id: StreamId,
-        msg: &M,
-    ) -> Result<()> {
+    pub(crate) fn about_to_send(&mut self, stream_id: StreamId, msg: &AnyRelayMsg) -> Result<()> {
         let mut hop_map = self.map.lock().expect("lock poisoned");
         let Some(StreamEntMut::Open(ent)) = hop_map.get_mut(stream_id) else {
             warn!(
@@ -442,7 +440,7 @@ impl CircHop {
             )));
         };
 
-        ent.take_capacity_to_send(msg)
+        ent.about_to_send(msg)
     }
 
     /// Add an entry to this map using the specified StreamId.
@@ -461,7 +459,7 @@ impl CircHop {
             sink,
             rx,
             self.build_flow_ctrl(
-                &self.flow_ctrl_params,
+                Arc::clone(&self.flow_ctrl_params),
                 rate_limit_updater,
                 drain_rate_requester,
             )?,
@@ -566,7 +564,7 @@ impl CircHop {
     #[cfg_attr(feature = "flowctl-cc", expect(clippy::unnecessary_wraps))]
     fn build_flow_ctrl(
         &self,
-        params: &FlowCtrlParameters,
+        params: Arc<FlowCtrlParameters>,
         rate_limit_updater: watch::Sender<StreamRateLimit>,
         drain_rate_requester: NotifySender<DrainRateRequest>,
     ) -> Result<StreamFlowCtrl> {
@@ -576,7 +574,20 @@ impl CircHop {
         } else {
             cfg_if::cfg_if! {
                 if #[cfg(feature = "flowctl-cc")] {
-                    Ok(StreamFlowCtrl::new_xon_xoff(params, rate_limit_updater, drain_rate_requester))
+                    // TODO: Currently arti only supports clients, and we don't support connecting
+                    // to onion services while using congestion control, so we hardcode these. In
+                    // the future we will need to somehow tell the `CircHop` these things so that we
+                    // can set them correctly.
+                    let our_endpoint = StreamEndpointType::Client;
+                    let peer_endpoint = StreamEndpointType::Exit;
+
+                    Ok(StreamFlowCtrl::new_xon_xoff(
+                        params,
+                        our_endpoint,
+                        peer_endpoint,
+                        rate_limit_updater,
+                        drain_rate_requester,
+                    ))
                 } else {
                     drop(rate_limit_updater);
                     drop(drain_rate_requester);

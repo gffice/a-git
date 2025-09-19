@@ -1,7 +1,10 @@
 //! Code for implementing flow control (stream-level).
 
+use std::sync::Arc;
+
 use postage::watch;
 use tor_cell::relaycell::flow_ctrl::{Xoff, Xon, XonKbpsEwma};
+use tor_cell::relaycell::msg::AnyRelayMsg;
 use tor_cell::relaycell::{RelayMsg, UnparsedRelayMsg};
 
 use super::params::FlowCtrlParameters;
@@ -43,13 +46,17 @@ impl StreamFlowCtrl {
     /// Returns a new xon/xoff-based [`StreamFlowCtrl`].
     #[cfg(feature = "flowctl-cc")]
     pub(crate) fn new_xon_xoff(
-        params: &FlowCtrlParameters,
+        params: Arc<FlowCtrlParameters>,
+        our_endpoint: StreamEndpointType,
+        peer_endpoint: StreamEndpointType,
         rate_limit_updater: watch::Sender<StreamRateLimit>,
         drain_rate_requester: NotifySender<DrainRateRequest>,
     ) -> Self {
         Self {
             e: StreamFlowCtrlEnum::XonXoffBased(XonXoffFlowCtrl::new(
                 params,
+                our_endpoint,
+                peer_endpoint,
                 rate_limit_updater,
                 drain_rate_requester,
             )),
@@ -58,13 +65,13 @@ impl StreamFlowCtrl {
 }
 
 // forward all trait methods to the inner enum
-impl FlowCtrlMethods for StreamFlowCtrl {
+impl FlowCtrlHooks for StreamFlowCtrl {
     fn can_send<M: RelayMsg>(&self, msg: &M) -> bool {
         self.e.can_send(msg)
     }
 
-    fn take_capacity_to_send<M: RelayMsg>(&mut self, msg: &M) -> Result<()> {
-        self.e.take_capacity_to_send(msg)
+    fn about_to_send(&mut self, msg: &AnyRelayMsg) -> Result<()> {
+        self.e.about_to_send(msg)
     }
 
     fn put_for_incoming_sendme(&mut self, msg: UnparsedRelayMsg) -> Result<()> {
@@ -92,18 +99,19 @@ impl FlowCtrlMethods for StreamFlowCtrl {
 ///
 /// We use a trait so that we can use `enum_dispatch` on the inner [`StreamFlowCtrlEnum`] enum.
 #[enum_dispatch::enum_dispatch(StreamFlowCtrlEnum)]
-pub(crate) trait FlowCtrlMethods {
+pub(crate) trait FlowCtrlHooks {
     /// Whether this stream is ready to send `msg`.
     fn can_send<M: RelayMsg>(&self, msg: &M) -> bool;
 
-    /// Take capacity to send `msg`. If there's insufficient capacity, returns
-    /// an error.
+    /// Inform the flow control code that we're about to send `msg`.
+    /// Returns an error if the message should not be sent,
+    /// and the circuit should be closed.
     // TODO: Consider having this method wrap the message in a type that
     // "proves" we've applied flow control. This would make it easier to apply
     // flow control earlier, e.g. in `OpenStreamEntStream`, without introducing
     // ambiguity in the sending function as to whether flow control has already
     // been applied or not.
-    fn take_capacity_to_send<M: RelayMsg>(&mut self, msg: &M) -> Result<()>;
+    fn about_to_send(&mut self, msg: &AnyRelayMsg) -> Result<()>;
 
     /// Handle an incoming sendme.
     ///
@@ -170,4 +178,15 @@ impl std::fmt::Display for StreamRateLimit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} bytes/s", self.rate)
     }
+}
+
+/// An endpoint of a stream.
+///
+/// This could be either our end of the stream, or the other end of the stream.
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum StreamEndpointType {
+    /// A client, which could be an OP or an onion service.
+    Client,
+    /// An exit relay.
+    Exit,
 }
