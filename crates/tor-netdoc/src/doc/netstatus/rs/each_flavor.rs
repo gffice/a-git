@@ -12,20 +12,14 @@
 
 use super::*;
 
-// TODO: These methods should probably become, in whole or in part,
-// methods on the RouterStatus trait.
 impl RouterStatus {
     /// Return an iterator of ORPort addresses for this routerstatus
-    pub fn orport_addrs(&self) -> impl Iterator<Item = &net::SocketAddr> {
-        self.addrs().iter()
+    pub fn addrs(&self) -> impl Iterator<Item = net::SocketAddr> {
+        self.addrs.iter().copied()
     }
     /// Return the declared weight of this routerstatus in the directory.
     pub fn weight(&self) -> &RelayWeight {
         &self.weight
-    }
-    /// Return the ORPort addresses of this routerstatus
-    pub fn addrs(&self) -> &[net::SocketAddr] {
-        &self.addrs[..]
     }
     /// Return the protovers that this routerstatus says it implements.
     pub fn protovers(&self) -> &Protocols {
@@ -111,12 +105,8 @@ impl RouterStatus {
         // R line
         let r_item = sec.required(RS_R)?;
         let nickname = r_item.required_arg(0)?.parse()?;
-        let ident = r_item.required_arg(1)?.parse::<B64>()?;
-        let identity = RsaIdentity::from_bytes(ident.as_bytes()).ok_or_else(|| {
-            EK::BadArgument
-                .at_pos(r_item.pos())
-                .with_msg("Wrong identity length")
-        })?;
+        let ident = r_item.required_arg(1)?;
+        let identity = ident.parse::<Base64Fingerprint>()?;
         // Fields to skip in the "r" line.
         let n_skip = match FLAVOR {
             ConsensusFlavor::Microdesc => 0,

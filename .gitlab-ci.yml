@@ -1,5 +1,4 @@
 stages:
-  - check
   - build
   - test
   - deploy
@@ -68,20 +67,20 @@ default:
     - if command -v cargo && test -d ./target; then cargo clean; fi
 
 check-editorconfig:
-  stage: check
+  stage: build
   image: docker.io/mstruebing/editorconfig-checker
   script:
     - ec
 
 shellcheck:
-  stage: check
+  stage: build
   image: docker.io/koalaman/shellcheck-alpine
   script:
     - apk add git bash
     - ./maint/common/shellcheck-all
 
 python3-checks:
-  stage: check
+  stage: build
   variables:
     # Updated 2025-09-15
     BLACK_VERSION: "25.1.0"
@@ -112,7 +111,7 @@ python3-checks:
     - ./maint/python-lints
 
 maint-checks:
-  stage: check
+  stage: build
   script:
     - maint/common/apt-install git python3-toml python3-requests python3-mistune
     - ./maint/check_toposort
@@ -738,6 +737,22 @@ cli-help:
   image: $RECENT_RUST_IMAGE
   script:
     - ./maint/check-cli-help
+
+# TODO: in the future we may want to build and run the fuzz tests, but checking is good enough for now
+# https://gitlab.torproject.org/tpo/core/arti/-/issues/1350
+fuzz-check:
+  stage: test
+  # cargo-fuzz needs nightly
+  image: docker.io/rustlang/rust:nightly
+  # fuzz tests don't currently build
+  allow_failure: true
+  # this job doesn't depend on anything
+  needs: []
+  script:
+    - ./maint/common/apt-install libclang-dev
+    - rustup show
+    - ./maint/common/via-cargo-install-in-ci cargo-fuzz --version 0.13.1
+    - ./maint/fuzz_it_all -c
 
 # TODO: this should be folded in one of the other test jobs.
 #
