@@ -39,21 +39,21 @@ mod rsa {
 /// Types related to times
 pub(crate) mod times {
     use super::*;
+    use crate::types::misc::Iso8601TimeSp;
 
     /// Date and time in deprecated ISO8601-with-space separate arguments syntax
     ///
     /// Eg `dir-key-published` in a dir auth key cert.
-    #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, derive_more::Deref)]
-    #[allow(clippy::exhaustive_structs)]
-    pub struct NdaSystemTimeDeprecatedSyntax(#[deref] pub SystemTime);
+    // TODO this should be
+    //   #[deprecated = "use the Iso8601TimeSp name instead"]
+    // but right now we have too much outstanding work in flight to do that.
+    pub type NdaSystemTimeDeprecatedSyntax = Iso8601TimeSp;
 
     impl ItemArgumentParseable for NdaSystemTimeDeprecatedSyntax {
-        fn from_args<'s>(
-            args: &mut ArgumentStream<'s>,
-            field: &'static str,
-        ) -> Result<Self, ErrorProblem> {
+        fn from_args<'s>(args: &mut ArgumentStream<'s>) -> Result<Self, ArgumentError> {
             let t;
             (t, *args) = (|| {
+                let whole_line_len = args.whole_line_len();
                 let args = args.clone().into_remaining();
                 let spc2 = args
                     .match_indices(WS)
@@ -62,9 +62,8 @@ pub(crate) mod times {
                     .unwrap_or_else(|| args.len());
                 let (t, rest) = args.split_at(spc2);
                 let t: crate::types::misc::Iso8601TimeSp =
-                    t.parse().map_err(|_| EP::InvalidArgument { field })?;
-                let t = NdaSystemTimeDeprecatedSyntax(t.into());
-                Ok::<_, EP>((t, ArgumentStream::new(rest)))
+                    t.parse().map_err(|_| ArgumentError::Invalid)?;
+                Ok::<_, AE>((t, ArgumentStream::new(rest, whole_line_len)))
             })()?;
             Ok(t)
         }
