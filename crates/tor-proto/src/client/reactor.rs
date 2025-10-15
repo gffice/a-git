@@ -23,7 +23,7 @@ mod control;
 pub(super) mod syncview;
 
 use crate::circuit::UniqId;
-use crate::client::circuit::celltypes::ClientCircChanMsg;
+use crate::circuit::celltypes::ClientCircChanMsg;
 use crate::client::circuit::padding::{PaddingController, PaddingEvent, PaddingEventStream};
 use crate::client::circuit::{CircuitRxReceiver, TimeoutEstimator};
 use crate::client::stream::AnyCmdChecker;
@@ -523,12 +523,6 @@ macro_rules! unwrap_or_shutdown {
         }
     }};
 }
-
-// Note: this is used in the relay reactor too
-//
-// TODO(relay): refactor the common parts of the two reactors
-// into a shared module
-pub(crate) use unwrap_or_shutdown;
 
 /// Object to handle incoming cells and background tasks on a circuit
 ///
