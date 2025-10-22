@@ -57,6 +57,7 @@
 mod cli;
 mod config;
 mod relay;
+mod tasks;
 
 use std::fmt::Display;
 use std::io::IsTerminal as _;
@@ -66,7 +67,8 @@ use clap::Parser;
 use futures::FutureExt;
 use futures::task::SpawnExt;
 use safelog::with_safe_logging_suppressed;
-use tor_rtcompat::{PreferredRuntime, Runtime, ToplevelRuntime};
+use tor_rtcompat::tokio::TokioRustlsRuntime;
+use tor_rtcompat::{Runtime, ToplevelRuntime};
 use tracing::{debug, info, trace};
 use tracing_subscriber::FmtSubscriber;
 use tracing_subscriber::filter::EnvFilter;
@@ -131,6 +133,8 @@ fn main_main(cli: cli::Cli) -> anyhow::Result<()> {
 // Pass by value so that we don't need to clone fields, which keeps the code simpler.
 #[allow(clippy::needless_pass_by_value)]
 fn start_relay(_args: cli::RunArgs, global_args: cli::GlobalArgs) -> anyhow::Result<()> {
+    // TODO: Warn (or exit?) if running as root; see 'arti::process::running_as_root()'.
+
     let mut cfg_sources = global_args
         .config()
         .context("Failed to get configuration sources")?;
@@ -234,21 +238,26 @@ fn mainloop<T: Send + 'static>(
 }
 
 /// Run the relay.
-async fn run_relay<R: Runtime>(runtime: R, relay: InertTorRelay) -> anyhow::Result<()> {
-    let _relay = relay
+///
+/// This blocks until the relay stops.
+async fn run_relay<R: Runtime>(runtime: R, inert_relay: InertTorRelay) -> anyhow::Result<()> {
+    let relay = inert_relay
         .bootstrap(runtime)
         .await
         .context("Failed to bootstrap")?;
-    Ok(())
+    // This blocks until end of time or an error.
+    relay.run().await
 }
 
 /// Initialize a runtime.
 ///
-/// Any commands that need a runtime should call this so that we use a consistent runtime.
+/// Any cli commands that need a runtime should call this so that we use a consistent runtime.
 fn init_runtime() -> std::io::Result<impl ToplevelRuntime> {
-    // Use the tokio runtime from tor_rtcompat unless we later find a reason to use tokio directly;
-    // see https://gitlab.torproject.org/tpo/core/arti/-/work_items/1744
-    PreferredRuntime::create()
+    // Use the tokio runtime from tor_rtcompat unless we later find a reason to use tokio directly.
+    // See https://gitlab.torproject.org/tpo/core/arti/-/work_items/1744.
+    // Relays must use rustls as native-tls doesn't support
+    // `CertifiedConn::export_keying_material()`.
+    TokioRustlsRuntime::create()
 }
 
 /// The result of [`mainloop`].
@@ -261,6 +270,7 @@ enum MainloopStatus<T> {
 
 /// Formats an iterator as an object whose display implementation is a `separator`-separated string
 /// of items from `iter`.
+// TODO: This can be replaced with `std::fmt::from_fn()` once stabilised and within our MSRV.
 fn iter_join(separator: &str, iter: impl Iterator<Item: Display> + Clone) -> impl Display {
     struct Fmt<'a, I: Iterator<Item: Display> + Clone> {
         /// Separates items in `iter`.
