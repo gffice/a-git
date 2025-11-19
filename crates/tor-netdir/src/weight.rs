@@ -425,7 +425,8 @@ mod test {
     use std::net::SocketAddr;
     use std::time::{Duration, SystemTime};
     use tor_basic_utils::test_rng::testing_rng;
-    use tor_netdoc::doc::netstatus::{Lifetime, MdRouterStatusBuilder, RelayFlags};
+    use tor_netdoc::doc::netstatus::{Lifetime, MdRouterStatusBuilder};
+    use tor_netdoc::types::relay_flags::{RelayFlag, RelayFlags};
 
     #[test]
     fn t_clamp() {
@@ -593,7 +594,7 @@ mod test {
 
         // Now try those last few with routerstatuses.
         let rs = rs_builder()
-            .set_flags(RelayFlags::GUARD | RelayFlags::V2DIR)
+            .set_flags(RelayFlag::Guard | RelayFlag::V2Dir)
             .weight(RW::Measured(7777))
             .build()
             .unwrap();
@@ -619,13 +620,13 @@ mod test {
 
     #[test]
     fn weight_flags() {
-        let rs1 = rs_builder().set_flags(RelayFlags::EXIT).build().unwrap();
+        let rs1 = rs_builder().set_flags(RelayFlag::Exit).build().unwrap();
         assert_eq!(WeightKind::for_rs(&rs1), WeightKind::EXIT);
 
-        let rs1 = rs_builder().set_flags(RelayFlags::GUARD).build().unwrap();
+        let rs1 = rs_builder().set_flags(RelayFlag::Guard).build().unwrap();
         assert_eq!(WeightKind::for_rs(&rs1), WeightKind::GUARD);
 
-        let rs1 = rs_builder().set_flags(RelayFlags::V2DIR).build().unwrap();
+        let rs1 = rs_builder().set_flags(RelayFlag::V2Dir).build().unwrap();
         assert_eq!(WeightKind::for_rs(&rs1), WeightKind::DIR);
 
         let rs1 = rs_builder().build().unwrap();
@@ -655,7 +656,7 @@ mod test {
             rs_builder()
                 .identity(rng.random::<[u8; 20]>().into()) // random id
                 .weight(RW::Unmeasured(1_000_000))
-                .set_flags(RelayFlags::GUARD | RelayFlags::EXIT)
+                .set_flags(RelayFlag::Guard | RelayFlag::Exit)
                 .build_into(&mut bld)
                 .unwrap();
         }
@@ -663,7 +664,7 @@ mod test {
             rs_builder()
                 .identity(rng.random::<[u8; 20]>().into()) // random id
                 .weight(RW::Measured(1_000 * n))
-                .set_flags(RelayFlags::GUARD | RelayFlags::EXIT)
+                .set_flags(RelayFlag::Guard | RelayFlag::Exit)
                 .build_into(&mut bld)
                 .unwrap();
         }
