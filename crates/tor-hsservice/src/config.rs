@@ -42,7 +42,7 @@ pub struct OnionServiceConfig {
 
     /// A rate-limit on the acceptable rate of introduction requests.
     ///
-    /// We send this to the send to the introduction point to configure how many
+    /// We send this to the introduction point to configure how many
     /// introduction requests it sends us.
     /// If this is not set, the introduction point chooses a default based on
     /// the current consensus.
@@ -56,6 +56,11 @@ pub struct OnionServiceConfig {
 
     /// How many streams will we allow to be open at once for a single circuit on
     /// this service?
+    ///
+    /// If a client attempts to open more than this many streams on a rendezvous circuit,
+    /// the circuit will be torn down.
+    ///
+    /// Equivalent to C Tor's HiddenServiceMaxStreamsCloseCircuit option.
     #[builder(default = "65535")]
     max_concurrent_streams_per_circuit: u32,
 
