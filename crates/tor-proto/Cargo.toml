@@ -90,7 +90,7 @@ cfg-if = "1.0.0"
 cipher = { version = "0.4.1", features = ["zeroize"] }
 coarsetime = "0.1.20"
 ctr = { version = "0.9", optional = true, features = ["zeroize"] }
-derive-deftly = "1.5.0"
+derive-deftly = "~1.6.0"
 derive_builder = { version = "0.11.2", package = "derive_builder_fork_arti" }
 derive_more = { version = "2.0.1", features = ["full"] }
 digest = "0.10.0"
@@ -143,11 +143,11 @@ void = "1"
 zeroize = "1"
 
 [target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
-criterion-cycles-per-byte = "0.7.0"
+criterion-cycles-per-byte = "0.8.0"
 
 [dev-dependencies]
 assert_matches = "1.5.0"
-criterion = "0.7.0"
+criterion = "0.8.0"
 hex = "0.4"
 hex-literal = "1.0"
 humantime = "2"
