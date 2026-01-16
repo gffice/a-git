@@ -116,7 +116,7 @@ pub use UncheckedPlainConsensus as UncheckedNsConsensus;
 pub use UnvalidatedPlainConsensus as UnvalidatedNsConsensus;
 
 #[cfg(feature = "ns-vote")]
-pub use rs::RouterStatusMdDigestsVote;
+pub use rs::{RouterStatusMdDigestsVote, SoftwareVersion};
 
 /// `publiscation` field in routerstatus entry intro item other than in votes
 ///
@@ -452,9 +452,13 @@ impl ProtoStatuses {
 
 /// A recognized 'flavor' of consensus document.
 ///
+/// The enum is exhaustive because the addition/removal of a consensus flavor
+/// should indeed be a breaking change, as it would inevitable require
+/// interfacing code to think about the handling of it.
+///
 /// <https://spec.torproject.org/dir-spec/computing-consensus.html#flavors>
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
-#[non_exhaustive]
+#[allow(clippy::exhaustive_enums)]
 pub enum ConsensusFlavor {
     /// A "microdesc"-flavored consensus.  This is the one that
     /// clients and relays use today.
@@ -1151,7 +1155,7 @@ mod parse2_impls {
         }
     }
 
-    impl ItemValueParseable for rs::Version {
+    impl ItemValueParseable for rs::SoftwareVersion {
         fn from_unparsed(mut item: parse2::UnparsedItem<'_>) -> Result<Self, EP> {
             item.check_no_object()?;
             item.args_mut()

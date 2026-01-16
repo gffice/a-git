@@ -14,11 +14,8 @@
 use super::super::*;
 
 /// Toplevel document string for error reporting
-const TOPLEVEL_DOCTYPE_FOR_ERROR: &str = ns_expr!(
-    "NetworkStatusVote",
-    "NetworkStatusNs",
-    "NetworkStatusMd",
-);
+const TOPLEVEL_DOCTYPE_FOR_ERROR: &str =
+    ns_expr!("NetworkStatusVote", "NetworkStatusNs", "NetworkStatusMd",);
 
 /// The real router status entry type.
 pub type Router = ns_type!(
@@ -43,10 +40,7 @@ pub struct NetworkStatus {
     pub vote_status: NdiVoteStatus,
 
     /// `published`
-    pub published: ns_type!(
-        (NdaSystemTimeDeprecatedSyntax,),
-        Option<Void>,
-    ),
+    pub published: ns_type!((NdaSystemTimeDeprecatedSyntax,), Option<Void>,),
 
     /// `valid-after`
     pub valid_after: (NdaSystemTimeDeprecatedSyntax,),
@@ -111,13 +105,13 @@ pub struct NdaNetworkStatusVersionFlavour {}
 const NDA_NETWORK_STATUS_VERSION_FLAVOUR: Option<&str> = ns_expr!(None, None, Some("microdesc"));
 
 impl ItemArgumentParseable for NdaNetworkStatusVersionFlavour {
-    fn from_args<'s>(args: &mut ArgumentStream<'s>)
-                     -> Result<Self, AE>
-    {
+    fn from_args<'s>(args: &mut ArgumentStream<'s>) -> Result<Self, AE> {
         let exp: Option<&str> = NDA_NETWORK_STATUS_VERSION_FLAVOUR;
         if let Some(exp) = exp {
             let got = args.next().ok_or(AE::Missing)?;
-            if got != exp { return Err(AE::Invalid) };
+            if got != exp {
+                return Err(AE::Invalid);
+            };
         } else {
             // NS consensus, or vote.  Reject additional arguments, since they
             // might be an unknown flavour.  See
@@ -137,7 +131,7 @@ impl FromStr for NdaVoteStatus {
         if s == NDA_VOTE_STATUS {
             Ok(Self {})
         } else {
-            Err(InvalidNetworkStatusVoteStatus { })
+            Err(InvalidNetworkStatusVoteStatus {})
         }
     }
 }
@@ -201,6 +195,10 @@ ns_choose! { (
             fn is_intro_item_keyword(kw: KeywordRef<'_>) -> bool {
                 NddAuthorityEntry::is_intro_item_keyword(kw)
             }
+            fn is_structural_keyword(kw: KeywordRef<'_>) -> Option<IsStructural> {
+                NddAuthorityEntry::is_structural_keyword(kw)
+                    .or_else(|| authcert::DirAuthKeyCertSigned::is_structural_keyword(kw))
+            }
             fn from_items<'s>(
                 input: &mut ItemStream<'s>,
                 stop_outer: stop_at!(),
@@ -231,7 +229,7 @@ ns_choose! { (
         /// Authority entry
         pub authority: NddAuthorityEntry,
         /// Authority key certificate
-        pub cert: authcert::DirAuthKeyCertSigned,
+        pub cert: crate::doc::authcert::EncodedAuthCert,
     }
 )(
     /// An authority section in a consensus
@@ -269,6 +267,9 @@ ns_choose! { (
         fn is_intro_item_keyword(kw: KeywordRef<'_>) -> bool {
             NddAuthorityEntry::is_intro_item_keyword(kw)
         }
+        fn is_structural_keyword(kw: KeywordRef<'_>) -> Option<IsStructural> {
+            NddAuthorityEntry::is_structural_keyword(kw)
+        }
         fn from_items(
             input: &mut ItemStream<'_>,
             stop_outer: stop_at!(),
@@ -296,7 +297,7 @@ ns_choose! { (
                         let item = input.next().expect("just peeked")?;
                         let entry = NdiAuthorityDirSource::from_unparsed(item)?;
                         if !entry.nickname.as_str().ends_with("-legacy") {
-                            return Err(EP::Other(
+                            return Err(EP::OtherBadDocument(
  "authority entry lacks mandatory fields (eg `contact`) so is not a proper (non-superseded) entry, but nickname lacks `-legacy` suffix so is not a superseded entry"
                             ))
                         }
@@ -308,7 +309,7 @@ ns_choose! { (
             if !authorities.is_sorted_by_key(
                 |entry| matches!(entry, NddAuthorityEntryOrSuperseded::Superseded(_))
             ) {
-                return Err(EP::Other(
+                return Err(EP::OtherBadDocument(
  "normal (non-superseded) authority entry follows superseded authority key entry"
                 ))
             }
@@ -333,12 +334,11 @@ ns_choose! { (
             let validity = *self.body.published.0 ..= *self.body.valid_until.0;
             check_validity_time(now, validity)?;
 
-            let cert = self.body.authority.cert.clone();
-            let cert = cert.verify_selfcert(now)?;
+            let cert = self.body.parse_authcert()?.verify_selfcert(now)?;
 
             netstatus::verify_general_timeless(
                 slice::from_ref(&self.signatures.directory_signature),
-                &[*cert.h_kp_auth_id_rsa.0],
+                &[*cert.fingerprint],
                 &[&cert],
                 1,
             )?;
@@ -348,6 +348,15 @@ ns_choose! { (
     }
 
     impl NetworkStatus {
+        /// Parse the embedded authcert
+        fn parse_authcert(&self) -> Result<crate::doc::authcert::AuthCertSigned, EP> {
+            let cert_input = ParseInput::new(
+                self.authority.cert.as_str(),
+                "<embedded auth cert>",
+            );
+            parse_netdoc(&cert_input).map_err(|e| e.problem)
+        }
+
         /// Voter identity
         ///
         /// # Security considerations
@@ -358,13 +367,14 @@ ns_choose! { (
         /// It is up to the caller to decide whether this identity is actually
         /// a voter, count up votes, etc.
         pub fn h_kp_auth_id_rsa(&self) -> pk::rsa::RsaIdentity {
-            *self.authority.cert
+            *self.parse_authcert()
                 // SECURITY: if the user calls this function, they have a bare
-                // NetworkStatus, not a NetworkStatusSigned,
-                // so verification has already been done in verify_selfcert above.
+                // NetworkStatus, not a NetworkStatusSigned, so parsing
+                // and verification has already been done in verify_selfcert above.
+                .expect("was verified already!")
                 .inspect_unverified()
                 .0
-                .h_kp_auth_id_rsa.0
+                .fingerprint
         }
     }
 ) (
