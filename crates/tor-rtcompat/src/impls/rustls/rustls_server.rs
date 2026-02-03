@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use futures::{AsyncRead, AsyncWrite};
 use pin_project::pin_project;
 use std::{
+    borrow::Cow,
     io::{Error as IoError, Result as IoResult},
     marker::PhantomData,
     pin::Pin,
@@ -68,11 +69,11 @@ impl<S: StreamOps> StreamOps for RustlsServerStream<S> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> CertifiedConn for RustlsServerStream<S> {
-    fn peer_certificate(&self) -> IoResult<Option<Vec<u8>>> {
+    fn peer_certificate(&self) -> IoResult<Option<Cow<'_, [u8]>>> {
         let (_, session) = self.stream.get_ref();
         Ok(session
             .peer_certificates()
-            .and_then(|certs| certs.first().map(|c| Vec::from(c.as_ref()))))
+            .and_then(|certs| certs.first().map(|c| Cow::from(c.as_ref()))))
     }
 
     fn export_keying_material(
@@ -87,8 +88,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> CertifiedConn for RustlsServerStream<S> 
             .map_err(|e| IoError::new(std::io::ErrorKind::InvalidData, e))
     }
 
-    fn own_certificate(&self) -> IoResult<Option<Vec<u8>>> {
-        Ok(Some(self.cert_der.to_vec()))
+    fn own_certificate(&self) -> IoResult<Option<Cow<'_, [u8]>>> {
+        Ok(Some(Cow::from(self.cert_der.as_ref())))
     }
 }
 
@@ -126,9 +127,10 @@ where
 
 impl<S> RustlsAcceptor<S> {
     /// Construct a new RustlsAcceptor from a provided [`TlsAcceptorSettings`]
-    pub(crate) fn new(settings: TlsAcceptorSettings) -> IoResult<Self> {
-        let cfg: RustlsServerConfig = rustls_server_config(&settings)?;
-        let cert_der = settings.cert_der.into();
+    pub(crate) fn new(settings: &TlsAcceptorSettings) -> IoResult<Self> {
+        let cert_der = settings.cert_der().into();
+
+        let cfg: RustlsServerConfig = rustls_server_config(settings)?;
         let acceptor = futures_rustls::TlsAcceptor::from(Arc::new(cfg));
         Ok(Self {
             acceptor,
@@ -142,17 +144,22 @@ impl<S> RustlsAcceptor<S> {
 ///
 /// This is not necessarily suitable for general use outside of being a Tor relay.
 fn rustls_server_config(settings: &TlsAcceptorSettings) -> IoResult<RustlsServerConfig> {
+    use futures_rustls::rustls::pki_types as pki;
     use futures_rustls::rustls::version::{TLS12, TLS13};
 
-    use futures_rustls::rustls::pki_types as pki;
     // Convert certificate and key into expected format.
-    let cert_chain = vec![pki::CertificateDer::from_slice(&settings.cert_der[..]).into_owned()];
-    let key_der = settings.key_der.as_ref();
-    let key_der: pki::PrivateKeyDer<'_> = match settings.key_fmt {
-        crate::traits::TlsPrivateKeyFmt::Pkcs1 => pki::PrivatePkcs1KeyDer::from(key_der).into(),
-        crate::traits::TlsPrivateKeyFmt::Pkcs8 => pki::PrivatePkcs8KeyDer::from(key_der).into(),
-    };
-    let key_der = key_der.clone_key();
+    let cert_chain = settings
+        .identity
+        .certificates_der()
+        .into_iter()
+        .map(|c| pki::CertificateDer::from_slice(c).into_owned())
+        .collect();
+    let key_der = settings
+        .identity
+        .private_key_pkcs8_der()
+        .map_err(IoError::other)?;
+    let key_der =
+        pki::PrivateKeyDer::Pkcs8(pki::PrivatePkcs8KeyDer::from(key_der.as_ref())).clone_key();
 
     // Initialize the ServerConfig.
     let config = RustlsServerConfig::builder_with_protocol_versions(&[&TLS12, &TLS13]) // 1.2 and 1.3 only.
