@@ -207,6 +207,11 @@ where
             // certificate earlier.  That would require changing out channel negotiation APIs,
             // though, and might not be worth it.
             .into_owned();
+        let our_cert = tls
+            .own_certificate()
+            .map_err(|e| map_ioe(e.into(), "TLS Certs"))?
+            .ok_or_else(|| Error::Internal(internal!("TLS connection without our certificate")))?
+            .into_owned();
         let builder = tor_proto::RelayChannelBuilder::new();
 
         let unverified = builder
@@ -226,7 +231,7 @@ where
             MaybeVerifiableRelayResponderChannel::Verifiable(c) => {
                 let clock_skew = c.clock_skew();
                 let now = self.runtime.wallclock();
-                c.verify(&target, &peer_cert, Some(now))
+                c.verify(&target, &peer_cert, &our_cert, Some(now))
                     .map_err(|e| map_proto(e, &target, Some(clock_skew)))?
                     .finish()
                     .await
@@ -585,7 +590,7 @@ mod test {
             client_rt.jump_to(now);
 
             // Create the channel builder that we want to test.
-            let transport = crate::transport::DefaultTransport::new(client_rt.clone());
+            let transport = crate::transport::DefaultTransport::new(client_rt.clone(), None);
             let builder = ChanBuilder::new_client(client_rt, transport);
 
             let (r1, r2): (Result<Arc<Channel>>, Result<LocalStream>) = futures::join!(
