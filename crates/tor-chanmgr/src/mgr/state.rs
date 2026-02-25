@@ -366,7 +366,7 @@ impl<C: AbstractChannelFactory> MgrState<C> {
     /// # Deadlock
     ///
     /// Calling a method on [`MgrState`] from within `func` may cause a deadlock.
-    #[allow(dead_code)]
+    #[allow(unused)]
     pub(crate) fn with_mut_builder<F>(&self, func: F)
     where
         F: FnOnce(&mut C),
@@ -889,12 +889,12 @@ mod test {
     use super::*;
     use crate::factory::BootstrapReporter;
     use async_trait::async_trait;
+    #[cfg(feature = "relay")]
+    use safelog::Sensitive;
     use std::sync::{Arc, Mutex};
     use tor_llcrypto::pk::ed25519::Ed25519Identity;
     use tor_proto::channel::params::ChannelPaddingInstructionsUpdates;
     use tor_proto::memquota::ChannelAccount;
-    #[cfg(feature = "relay")]
-    use {safelog::Sensitive, std::net::IpAddr};
 
     fn new_test_state() -> MgrState<FakeChannelFactory> {
         MgrState::new(
@@ -930,7 +930,6 @@ mod test {
         async fn build_channel_using_incoming(
             &self,
             _peer: Sensitive<std::net::SocketAddr>,
-            _my_addrs: Vec<IpAddr>,
             _stream: Self::Stream,
             _memquota: ChannelAccount,
         ) -> Result<Arc<Self::Channel>> {

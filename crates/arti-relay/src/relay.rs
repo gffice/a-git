@@ -28,7 +28,7 @@ use crate::config::TorRelayConfig;
 /// This intentionally does not have access to the runtime to prevent it from doing network io.
 ///
 /// The idea is that we can build up the relay's components in an `InertTorRelay` without a runtime,
-/// and then call `bootstrap()` on it and provide a runtime to turn it into a network-capable relay.
+/// and then call `init()` on it and provide a runtime to turn it into a network-capable relay.
 /// This gives us two advantages:
 ///
 /// - We can initialize the internal data structures in the `InertTorRelay` (load the keystores,
@@ -171,12 +171,6 @@ pub(crate) struct TorRelay<R: Runtime> {
 
     /// Listening OR ports.
     or_listeners: Vec<<R as NetStreamProvider<SocketAddr>>::Listener>,
-
-    /// Advertised IP address(es) found in the config file.
-    ///
-    /// They are kept here so they can be passed on to the OR listener task which in turn uses them
-    /// for new inbound channels to send them in the NETINFO cell.
-    advertised_addresses: crate::config::Advertise,
 }
 
 impl<R: Runtime> TorRelay<R> {
@@ -194,8 +188,9 @@ impl<R: Runtime> TorRelay<R> {
         let memquota = MemoryQuotaTracker::new(&runtime, inert.config.system.memory.clone())
             .context("Failed to initialize memquota tracker")?;
 
-        let config =
-            ChanMgrConfig::new(inert.config.channel.clone()).with_identities(Arc::new(identities));
+        let config = ChanMgrConfig::new(inert.config.channel.clone())
+            .with_my_addrs(inert.config.relay.advertise.all_ips())
+            .with_identities(Arc::new(identities));
         let chanmgr = Arc::new(
             ChanMgr::new(
                 runtime.clone(),
@@ -271,7 +266,6 @@ impl<R: Runtime> TorRelay<R> {
             chanmgr,
             keymgr: inert.keymgr,
             or_listeners,
-            advertised_addresses: inert.config.relay.advertise,
         })
     }
 
@@ -298,14 +292,9 @@ impl<R: Runtime> TorRelay<R> {
             let chanmgr = Arc::clone(&self.chanmgr);
             async {
                 // TODO: Should we give all tasks a `start` method?
-                crate::tasks::listeners::or_listener(
-                    runtime,
-                    chanmgr,
-                    self.or_listeners,
-                    self.advertised_addresses,
-                )
-                .await
-                .context("Failed to run OR listener task")
+                crate::tasks::listeners::or_listener(runtime, chanmgr, self.or_listeners)
+                    .await
+                    .context("Failed to run OR listener task")
             }
         });
 
@@ -313,8 +302,9 @@ impl<R: Runtime> TorRelay<R> {
         task_handles.spawn({
             let runtime = self.runtime.clone();
             let keymgr = self.keymgr.clone();
+            let chanmgr = self.chanmgr.clone();
             async {
-                crate::tasks::crypto::rotate_keys_task(runtime, keymgr)
+                crate::tasks::crypto::rotate_keys_task(runtime, keymgr, chanmgr)
                     .await
                     .context("Failed to run key rotation task")
             }

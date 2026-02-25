@@ -7,6 +7,7 @@ use std::{
 };
 use tor_basic_utils::rand_hostname;
 use tor_cert::x509::TlsKeyAndCert;
+use tor_chanmgr::ChanMgr;
 use tor_proto::RelayIdentities;
 
 use tor_key_forge::ToEncodableCert;
@@ -103,9 +104,10 @@ where
     let mut rng = tor_llcrypto::rng::CautiousRng;
 
     match keymgr.generate::<K>(spec, KeystoreSelector::default(), &mut rng, false) {
+        Ok(_) => {}
         // Key already existing can happen due to wall clock strangeness,
         // so simply ignore it.
-        Ok(_) | Err(tor_keymgr::Error::KeyAlreadyExists) => tracing::warn!(
+        Err(tor_keymgr::Error::KeyAlreadyExists) => tracing::warn!(
             "Failed to generate key at {:?} because one already exists. Clock drift?",
             spec.arti_path(),
         ),
@@ -118,11 +120,13 @@ where
 ///
 /// Rotation is done by listing all keys matching the key specifier pattern and validting the
 /// valid_until value of the key store entry. If expired, the key is removed from the key manager.
-fn rotate_key<K>(keymgr: &KeyMgr) -> anyhow::Result<()>
+fn rotate_key<K>(keymgr: &KeyMgr) -> anyhow::Result<bool>
 where
     K: RotatableKeySpec + ToEncodableKey,
     <K as ToEncodableKey>::Key: Keygen,
 {
+    // Indicate if the key was rotated.
+    let mut have_rotated = false;
     // Select all signing keypair in the keystore because we need to inspect the valid_until
     // field and rotate if expired.
     let key_entries = keymgr.list_matching(&K::Pattern::new_any().arti_pattern()?)?;
@@ -131,7 +135,7 @@ where
 
     if key_entries.is_empty() {
         generate_key::<K>(keymgr, &key_specifier)?;
-        return Ok(());
+        return Ok(true);
     }
 
     for key in key_entries {
@@ -148,19 +152,20 @@ where
             );
             keymgr.remove_entry(&key)?;
             generate_key::<K>(keymgr, &key_specifier)?;
+            have_rotated = true;
         };
     }
 
-    Ok(())
+    Ok(have_rotated)
 }
 
 /// Attempt to rotate all rotatable keys.
-fn try_rotate_keys(keymgr: &KeyMgr) -> anyhow::Result<()> {
+fn try_rotate_keys(keymgr: &KeyMgr) -> anyhow::Result<bool> {
     // Attempt to rotate the KP_relaysign_ed.
-    rotate_key::<RelaySigningKeypair>(keymgr)?;
+    let mut have_rotated = rotate_key::<RelaySigningKeypair>(keymgr)?;
     // Attempt to rotate the KP_link_ed.
-    rotate_key::<RelayLinkSigningKeypair>(keymgr)?;
-    Ok(())
+    have_rotated |= rotate_key::<RelayLinkSigningKeypair>(keymgr)?;
+    Ok(have_rotated)
 }
 
 /// Build a fresh [`RelayIdentities`] object using a [`KeyMgr`].
@@ -174,10 +179,12 @@ fn build_proto_identities(keymgr: &KeyMgr) -> anyhow::Result<RelayIdentities> {
 
     // Get the identity keypairs.
     let rsa_id_kp: RelayIdentityRsaKeypair = keymgr
-        .get(&RelayIdentityRsaKeypairSpecifier::new())?
+        .get(&RelayIdentityRsaKeypairSpecifier::new())
+        .context("Failed to get RSA identity from key manager")?
         .context("Missing RSA identity")?;
     let ed_id_kp: RelayIdentityKeypair = keymgr
-        .get(&RelayIdentityKeypairSpecifier::new())?
+        .get(&RelayIdentityKeypairSpecifier::new())
+        .context("Failed to get Ed25519 identity from key manager")?
         .context("Missing Ed25519 identity")?;
     // We have to list match here because the key specifier here uses a valid_until. We don't know
     // what it is so we list and take the first one.
@@ -187,7 +194,8 @@ fn build_proto_identities(keymgr: &KeyMgr) -> anyhow::Result<RelayIdentities> {
                 .list_matching(&RelayLinkSigningKeypairSpecifierPattern::new_any().arti_pattern()?)?
                 .first()
                 .context("No store entry for link authentication key")?,
-        )?
+        )
+        .context("Failed to get link authentication key from key manager")?
         .context("Missing link authentication key")?;
     let kp_relaysign_id: RelaySigningKeypair = keymgr
         .get_entry(
@@ -195,7 +203,8 @@ fn build_proto_identities(keymgr: &KeyMgr) -> anyhow::Result<RelayIdentities> {
                 .list_matching(&RelaySigningKeypairSpecifierPattern::new_any().arti_pattern()?)?
                 .first()
                 .context("No store entry for signing key")?,
-        )?
+        )
+        .context("Failed to get signing key from key manager")?
         .context("Missing signing key")?;
 
     // TLS key and cert. Random hostname like C-tor. We re-use the issuer_hostname for the RSA
@@ -203,7 +212,8 @@ fn build_proto_identities(keymgr: &KeyMgr) -> anyhow::Result<RelayIdentities> {
     let issuer_hostname = rand_hostname::random_hostname(&mut rng);
     let subject_hostname = rand_hostname::random_hostname(&mut rng);
     let tls_key_and_cert =
-        TlsKeyAndCert::create(&mut rng, now, &issuer_hostname, &subject_hostname)?;
+        TlsKeyAndCert::create(&mut rng, now, &issuer_hostname, &subject_hostname)
+            .context("Failed to create TLS keys and certificates")?;
 
     // Create the RSA X509 certificate.
     let cert_id_x509_rsa = tor_cert::x509::create_legacy_rsa_id_cert(
@@ -211,7 +221,8 @@ fn build_proto_identities(keymgr: &KeyMgr) -> anyhow::Result<RelayIdentities> {
         SystemTime::now(),
         &issuer_hostname,
         rsa_id_kp.keypair(),
-    )?;
+    )
+    .context("Failed to create legacy RSA identity certificate")?;
 
     // The following expiry duration have been taken from C-tor.
 
@@ -274,10 +285,16 @@ pub(crate) fn try_generate_keys(keymgr: &KeyMgr) -> anyhow::Result<RelayIdentiti
 pub(crate) async fn rotate_keys_task<R: Runtime>(
     runtime: R,
     keymgr: Arc<KeyMgr>,
+    chanmgr: Arc<ChanMgr<R>>,
 ) -> anyhow::Result<void::Void> {
     loop {
         // Attempt a rotation of all keys.
-        try_rotate_keys(&keymgr)?;
+        if try_rotate_keys(&keymgr)? {
+            let ids = build_proto_identities(&keymgr)?;
+            chanmgr
+                .set_relay_identities(Arc::new(ids))
+                .context("Failed to set relay identities on ChanMgr")?;
+        }
 
         // Wake up every minute.
         let next_wake = SystemTime::now() + KEY_ROTATION_SLEEP_DURATION;

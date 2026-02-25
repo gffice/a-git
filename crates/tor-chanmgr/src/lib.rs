@@ -77,7 +77,7 @@ use void::{ResultVoidErrExt, Void};
 
 #[cfg(feature = "relay")]
 use {
-    async_trait::async_trait, safelog::Sensitive, std::net::IpAddr,
+    async_trait::async_trait, safelog::Sensitive,
     tor_proto::relay::channel_provider::ChannelProvider,
 };
 
@@ -242,7 +242,7 @@ impl<R: Runtime> ChanMgr<R> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "relay")] {
                 let builder = if let Some(identities) = &config.identities {
-                    builder::ChanBuilder::new_relay(runtime.clone(), transport, identities.clone())?
+                    builder::ChanBuilder::new_relay(runtime.clone(), transport, identities.clone(), config.my_addrs)?
                 } else {
                     // Yes, clients can have the "relay" feature enabled (unit tests).
                     builder::ChanBuilder::new_client(runtime.clone(), transport)
@@ -305,10 +305,9 @@ impl<R: Runtime> ChanMgr<R> {
     pub async fn handle_incoming(
         &self,
         src: Sensitive<std::net::SocketAddr>,
-        my_addrs: Vec<IpAddr>,
         stream: <R as tor_rtcompat::NetStreamProvider>::Stream,
     ) -> Result<Arc<Channel>> {
-        self.mgr.handle_incoming(src, my_addrs, stream).await
+        self.mgr.handle_incoming(src, stream).await
     }
 
     /// Try to get a suitable channel to the provided `target`,
@@ -397,6 +396,23 @@ impl<R: Runtime> ChanMgr<R> {
     #[cfg(feature = "pt-client")]
     pub fn set_pt_mgr(&self, ptmgr: Arc<dyn factory::AbstractPtMgr + 'static>) {
         self.mgr.with_mut_builder(|f| f.replace_ptmgr(ptmgr));
+    }
+
+    /// Replace the relay identities used for building new channels.
+    ///
+    /// This rebuilds the internal channel builder with the provided `identities`, which includes a
+    /// new TLS cert and key. Existing channels are not affected, only newly created channels will
+    /// use the new identities.
+    #[cfg(feature = "relay")]
+    pub fn set_relay_identities(&self, identities: Arc<tor_proto::RelayIdentities>) -> Result<()> {
+        let mut result = Ok(());
+        self.mgr.with_mut_builder(|f| {
+            match f.default_factory().rebuild_with_identities(identities) {
+                Ok(b) => f.replace_default_factory(Arc::new(b)),
+                Err(e) => result = Err(e),
+            }
+        });
+        result
     }
 
     /// Try to create a new, unmanaged channel to `target`.
