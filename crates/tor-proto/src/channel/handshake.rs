@@ -2,29 +2,28 @@
 
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::sink::SinkExt;
-use futures::stream::StreamExt;
-use tor_cell::chancell::msg::AnyChanMsg;
-use tor_error::{internal, into_internal};
-
-use crate::channel::{Canonicity, ChannelFrame, UniqId};
-use crate::memquota::ChannelAccount;
-use crate::peer::{PeerAddr, PeerInfo};
-use crate::util::skew::ClockSkew;
-use crate::{Error, Result};
-use safelog::Redacted;
-use tor_cell::chancell::{AnyChanCell, ChanMsg, msg};
-use tor_rtcompat::{CoarseTimeProvider, SleepProvider, StreamOps};
-
-use std::net::{IpAddr, SocketAddr};
+use futures::stream::{Stream, StreamExt};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::channel::{Canonicity, ChannelFrame, UniqId};
+use crate::memquota::ChannelAccount;
+use crate::peer::PeerInfo;
+use crate::util::skew::ClockSkew;
+use crate::{Error, Result};
+use safelog::{MaybeSensitive, Redacted};
+use tor_cell::chancell::msg::AnyChanMsg;
+use tor_cell::chancell::{AnyChanCell, ChanCmd, ChanMsg, msg};
+use tor_cell::restrict::restricted_msg;
+use tor_error::{internal, into_internal};
 use tor_linkspec::{
     ChanTarget, ChannelMethod, OwnedChanTarget, OwnedChanTargetBuilder, RelayIds, RelayIdsBuilder,
 };
 use tor_llcrypto as ll;
 use tor_llcrypto::pk::ed25519::Ed25519Identity;
 use tor_llcrypto::pk::rsa::RsaIdentity;
+use tor_rtcompat::{CoarseTimeProvider, SleepProvider, StreamOps};
 
 use digest::Digest;
 
@@ -120,13 +119,10 @@ pub(crate) trait ChannelInitiatorHandshake<T>: ChannelBaseHandshake<T>
 where
     T: AsyncRead + AsyncWrite + StreamOps + Send + Unpin + 'static,
 {
-    /// Return true iff this handshake is expecting to receive an AUTH_CHALLENGE from the
-    /// responder. As a handshake initiator, we always know if we expect one or not. A client or
-    /// bridge do not authenticate with the responder while relays will always do.
-    fn is_expecting_auth_challenge(&self) -> bool;
-
-    /// As an initiator, we are expecting the responder's cells which are (not in that order):
-    ///     - [msg::AuthChallenge], [msg::Certs], [msg::Netinfo]
+    /// As an initiator, we are expecting the responder's cells which are:
+    /// - [msg::Certs]
+    /// - [msg::AuthChallenge]
+    /// - [msg::Netinfo]
     ///
     /// Any duplicate, missing cell or unexpected results in a protocol level error.
     ///
@@ -135,73 +131,113 @@ where
     async fn recv_cells_from_responder(
         &mut self,
     ) -> Result<(
-        Option<msg::AuthChallenge>,
+        msg::AuthChallenge,
         msg::Certs,
         (msg::Netinfo, coarsetime::Instant),
     )> {
-        let mut auth_challenge_cell: Option<msg::AuthChallenge> = None;
-        let mut certs_cell: Option<msg::Certs> = None;
-        let mut netinfo_cell: Option<(msg::Netinfo, coarsetime::Instant)> = None;
-
         // IMPORTANT: Protocol wise, we MUST only allow one single cell of each type for a valid
-        // handshake. Any duplicates lead to a failure. They can arrive in any order unfortunately.
+        // handshake. Any duplicates lead to a failure.
+        // They must arrive in a specific order in order for the SLOG calculation to be valid.
 
-        // Read until we have the netinfo cell.
-        while let Some(cell) = self.framed_tls().next().await.transpose()? {
-            use super::AnyChanMsg::*;
-            let (_, m) = cell.into_circid_and_msg();
-            trace!(stream_id = %self.unique_id(), "received a {} cell.", m.cmd());
-            match m {
-                // Ignore the padding. Only VPADDING cell can be sent during handshaking.
-                Vpadding(_) => (),
-                // Clients don't care about AuthChallenge
-                AuthChallenge(ac) => {
-                    if auth_challenge_cell.replace(ac).is_some() {
-                        return Err(Error::HandshakeProto(
-                            "Duplicate AUTH_CHALLENGE cell".into(),
-                        ));
-                    }
-                }
-                Certs(c) => {
-                    if certs_cell.replace(c).is_some() {
-                        return Err(Error::HandshakeProto("Duplicate CERTS cell".into()));
-                    }
-                }
-                Netinfo(n) => {
-                    if netinfo_cell.is_some() {
-                        // This should be impossible, since we would
-                        // exit this loop on the first netinfo cell.
-                        return Err(Error::from(internal!(
-                            "Somehow tried to record a duplicate NETINFO cell"
-                        )));
-                    }
-                    netinfo_cell = Some((n, coarsetime::Instant::now()));
-                    break;
-                }
-                // This should not happen because the ChannelFrame makes sure that only allowed cell on
-                // the channel are decoded. However, Rust wants us to consider all AnyChanMsg.
-                _ => {
-                    return Err(Error::from(internal!(
-                        "Unexpected cell during initiator handshake: {m:?}"
-                    )));
-                }
+        /// Read a message from the stream.
+        ///
+        /// The `expecting` parameter is used for logging purposes, not filtering.
+        async fn read_msg<T>(
+            stream_id: UniqId,
+            mut stream: impl Stream<Item = Result<AnyChanCell>> + Unpin,
+            expecting: &[ChanCmd],
+        ) -> Result<T>
+        where
+            T: TryFrom<AnyChanMsg, Error = AnyChanMsg>,
+        {
+            let Some(cell) = stream.next().await.transpose()? else {
+                // The entire channel has ended, so nothing else to be done.
+                return Err(Error::HandshakeProto("Stream ended unexpectedly".into()));
+            };
+
+            let (id, m) = cell.into_circid_and_msg();
+            trace!(%stream_id, "received a {} cell", m.cmd());
+
+            // TODO: Maybe also check this in the channel handshake codec?
+            if let Some(id) = id {
+                return Err(Error::HandshakeProto(format!(
+                    "Expected no circ ID for {} cell, but received circ ID of {id} instead",
+                    m.cmd(),
+                )));
             }
+
+            let m = m.try_into().map_err(|m: AnyChanMsg| {
+                Error::HandshakeProto(format!(
+                    "Expected {expecting:?} cell, but received {} cell instead",
+                    m.cmd(),
+                ))
+            })?;
+
+            Ok(m)
         }
 
-        // Missing any of the above means we are not connected to a Relay and so we abort the
-        // handshake protocol.
-        let Some((netinfo, netinfo_rcvd_at)) = netinfo_cell else {
-            return Err(Error::HandshakeProto("Missing NETINFO cell".into()));
-        };
-        let Some(certs) = certs_cell else {
-            return Err(Error::HandshakeProto("Missing CERTS cell".into()));
-        };
-        // If we plan to authenticate, we require an AUTH_CHALLENGE cell from the responder.
-        if self.is_expecting_auth_challenge() && auth_challenge_cell.is_none() {
-            return Err(Error::HandshakeProto("Missing AUTH_CHALLENGE cell".into()));
+        // Note that the `ChannelFrame` already restricts the messages due to its handshake cell
+        // handler.
+
+        let certs = loop {
+            restricted_msg! {
+                enum CertsMsg : ChanMsg {
+                    // VPADDING cells (but not PADDING) can be sent during handshaking.
+                    Vpadding,
+                    Certs,
+               }
+            }
+
+            let msg = read_msg(*self.unique_id(), self.framed_tls(), &[ChanCmd::CERTS]).await?;
+
+            break match msg {
+                CertsMsg::Vpadding(_) => continue,
+                CertsMsg::Certs(msg) => msg,
+            };
         };
 
-        Ok((auth_challenge_cell, certs, (netinfo, netinfo_rcvd_at)))
+        // Clients don't care about AuthChallenge,
+        // but the responder always sends it anyways so we require it here.
+        let auth_challenge = loop {
+            restricted_msg! {
+                enum AuthChallengeMsg : ChanMsg {
+                    // VPADDING cells (but not PADDING) can be sent during handshaking.
+                    Vpadding,
+                    AuthChallenge,
+               }
+            }
+
+            let msg = read_msg(
+                *self.unique_id(),
+                self.framed_tls(),
+                &[ChanCmd::AUTH_CHALLENGE],
+            )
+            .await?;
+
+            break match msg {
+                AuthChallengeMsg::Vpadding(_) => continue,
+                AuthChallengeMsg::AuthChallenge(msg) => msg,
+            };
+        };
+
+        let (netinfo, netinfo_rcvd_at) = loop {
+            restricted_msg! {
+                enum NetinfoMsg : ChanMsg {
+                    // VPADDING cells (but not PADDING) can be sent during handshaking.
+                    Vpadding,
+                    Netinfo,
+               }
+            }
+
+            let msg = read_msg(*self.unique_id(), self.framed_tls(), &[ChanCmd::NETINFO]).await?;
+
+            break match msg {
+                NetinfoMsg::Vpadding(_) => continue,
+                NetinfoMsg::Netinfo(msg) => (msg, coarsetime::Instant::now()),
+            };
+        };
+
+        Ok((auth_challenge, certs, (netinfo, netinfo_rcvd_at)))
     }
 }
 
@@ -545,7 +581,7 @@ impl<
         mut self,
         netinfo: &msg::Netinfo,
         my_addrs: &[IpAddr],
-        peer_addr: PeerAddr,
+        peer_info: MaybeSensitive<PeerInfo>,
     ) -> Result<(Arc<super::Channel>, super::reactor::Reactor<S>)> {
         // We treat a completed channel as incoming traffic since all cells were exchanged.
         //
@@ -573,13 +609,10 @@ impl<
         let stream_ops = self.framed_tls.new_handle();
         let (tls_sink, tls_stream) = self.framed_tls.split();
 
-        let netinfo_addr = peer_addr.netinfo_addr();
-        let peer_sockaddr = peer_addr.socket_addr();
-        // Unverified channel means we don't have identities. This is the case of a relay responder
-        // channel for which the peer is a client or bridge.
-        let peer = PeerInfo::new(peer_addr, RelayIds::empty());
+        let canonicity =
+            Canonicity::from_netinfo(netinfo, my_addrs, peer_info.addr().netinfo_addr());
 
-        let peer_id = build_filtered_chan_target(self.target_method.take(), peer_sockaddr, None);
+        let peer_id = build_filtered_chan_target(self.target_method.take(), &peer_info);
 
         debug!(
             stream_id = %self.unique_id,
@@ -594,11 +627,11 @@ impl<
             stream_ops,
             self.unique_id,
             peer_id,
-            peer,
+            peer_info,
             self.clock_skew,
             self.sleep_prov,
             self.memquota,
-            Canonicity::from_netinfo(netinfo, my_addrs, netinfo_addr),
+            canonicity,
         )
     }
 }
@@ -614,6 +647,15 @@ impl<
         Ok(())
     }
 
+    /// Build a [`RelayIds`] corresponding to this channel identities.
+    pub(crate) fn relay_ids(&self) -> Result<RelayIds> {
+        Ok(RelayIdsBuilder::default()
+            .ed_identity(self.ed25519_id)
+            .rsa_identity(self.rsa_id)
+            .build()
+            .map_err(into_internal!("Unable to build verified relay channel ids"))?)
+    }
+
     /// The channel is used to send cells, and to create outgoing circuits.
     /// The reactor is used to route incoming messages to their appropriate
     /// circuit.
@@ -622,7 +664,7 @@ impl<
         mut self,
         netinfo: &msg::Netinfo,
         my_addrs: &[IpAddr],
-        peer_addr: PeerAddr,
+        peer_info: MaybeSensitive<PeerInfo>,
     ) -> Result<(Arc<super::Channel>, super::reactor::Reactor<S>)> {
         // We treat a completed channel -- that is to say, one where the
         // authentication is finished -- as incoming traffic.
@@ -644,8 +686,7 @@ impl<
 
         debug!(
             stream_id = %self.unique_id,
-            "Completed handshake with ed25519:{} [{}]",
-            self.ed25519_id, self.rsa_id,
+            "Completed handshake with peer: {}", peer_info
         );
 
         // Grab a new handle on which we can apply StreamOps (needed for KIST).
@@ -657,24 +698,10 @@ impl<
         let stream_ops = self.framed_tls.new_handle();
         let (tls_sink, tls_stream) = self.framed_tls.split();
 
-        // Build the peer info of this channel.
-        let mut relay_ids_builder = RelayIdsBuilder::default();
-        relay_ids_builder.ed_identity(self.ed25519_id);
-        relay_ids_builder.rsa_identity(self.rsa_id);
-        let netinfo_addr = peer_addr.netinfo_addr();
-        let peer_sockaddr = peer_addr.socket_addr();
-        // Keep a dup here so we can put it in the OwnedChanTargetBuilder below.
-        let relay_ids_builder_dup = relay_ids_builder.clone();
-        let relay_ids = relay_ids_builder
-            .build()
-            .map_err(into_internal!("Unable to build relay ids"))?;
-        let peer = PeerInfo::new(peer_addr, relay_ids);
+        let canonicity =
+            Canonicity::from_netinfo(netinfo, my_addrs, peer_info.addr().netinfo_addr());
 
-        let peer_id = build_filtered_chan_target(
-            self.target_method.take(),
-            peer_sockaddr,
-            Some(relay_ids_builder_dup),
-        );
+        let peer_id = build_filtered_chan_target(self.target_method.take(), &peer_info);
 
         super::Channel::new(
             channel_type,
@@ -684,11 +711,11 @@ impl<
             stream_ops,
             self.unique_id,
             peer_id,
-            peer,
+            peer_info,
             self.clock_skew,
             self.sleep_prov,
             self.memquota,
-            Canonicity::from_netinfo(netinfo, my_addrs, netinfo_addr),
+            canonicity,
         )
     }
 }
@@ -721,21 +748,19 @@ pub(crate) fn unauthenticated_clock_skew(
 /// Helper: Build a OwnedChanTarget that retains only the address that was actually used.
 fn build_filtered_chan_target(
     target_method: Option<ChannelMethod>,
-    peer_sockaddr: Option<SocketAddr>,
-    relay_ids_builder: Option<RelayIdsBuilder>,
+    peer_info: &MaybeSensitive<PeerInfo>,
 ) -> OwnedChanTarget {
     let mut peer_builder = OwnedChanTargetBuilder::default();
     if let Some(mut method) = target_method {
         // Retain only the address that was actually used to connect.
-        if let Some(addr) = peer_sockaddr {
+        if let Some(addr) = peer_info.addr().socket_addr() {
             let _ = method.retain_addrs(|socket_addr| socket_addr == &addr);
             peer_builder.addrs(vec![addr]);
         }
         peer_builder.method(method);
     }
-    if let Some(ids) = relay_ids_builder {
-        *peer_builder.ids() = ids;
-    }
+    *peer_builder.ids() = RelayIdsBuilder::from_relay_ids(peer_info.ids());
+
     peer_builder
         .build()
         .expect("OwnedChanTarget builder failed")
@@ -799,6 +824,8 @@ pub(super) mod test {
             buf.extend_from_slice(VERSIONS);
             // certs cell -- no certs in it, but this function doesn't care.
             buf.extend_from_slice(NOCERTS);
+            // auth_challenge cell
+            buf.extend_from_slice(AUTHCHALLENGE);
             // netinfo cell -- quite minimal.
             add_padded(&mut buf, NETINFO_PREFIX);
             let mb = MsgBuf::new(&buf[..]);
@@ -889,7 +916,7 @@ pub(super) mod test {
             assert!(matches!(err, Error::HandshakeProto(_)));
             assert_eq!(
                 format!("{}", err),
-                "Handshake protocol violation: Duplicate CERTS cell"
+                "Handshake protocol violation: Expected [ChanCmd(AUTH_CHALLENGE)] cell, but received CERTS cell instead"
             );
 
             let mut buf = Vec::new();
@@ -902,7 +929,7 @@ pub(super) mod test {
             assert!(matches!(err, Error::HandshakeProto(_)));
             assert_eq!(
                 format!("{}", err),
-                "Handshake protocol violation: Duplicate AUTH_CHALLENGE cell"
+                "Handshake protocol violation: Expected [ChanCmd(NETINFO)] cell, but received AUTH_CHALLENGE cell instead"
             );
         });
     }
@@ -917,7 +944,7 @@ pub(super) mod test {
             assert!(matches!(err, Error::HandshakeProto(_)));
             assert_eq!(
                 format!("{}", err),
-                "Handshake protocol violation: Missing CERTS cell"
+                "Handshake protocol violation: Expected [ChanCmd(CERTS)] cell, but received NETINFO cell instead"
             );
         });
     }
@@ -932,7 +959,7 @@ pub(super) mod test {
             assert!(matches!(err, Error::HandshakeProto(_)));
             assert_eq!(
                 format!("{}", err),
-                "Handshake protocol violation: Missing NETINFO cell"
+                "Handshake protocol violation: Stream ended unexpectedly"
             );
         });
     }
@@ -1249,7 +1276,14 @@ pub(super) mod test {
             let peer_ip = peer_addr.ip();
             let netinfo = Netinfo::from_client(Some(peer_ip));
 
-            let (_chan, _reactor) = ver.finish(&netinfo, &[], peer_addr.into()).await.unwrap();
+            let (_chan, _reactor) = ver
+                .finish(
+                    &netinfo,
+                    &[],
+                    MaybeSensitive::not_sensitive(PeerInfo::EMPTY),
+                )
+                .await
+                .unwrap();
 
             // TODO: check contents of netinfo cell
         });
