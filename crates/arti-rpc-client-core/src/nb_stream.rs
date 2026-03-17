@@ -29,7 +29,7 @@ use std::{
 #[cfg(unix)]
 use std::os::fd::{AsFd as _, BorrowedFd as BorrowedOsHandle};
 #[cfg(windows)]
-use std::os::windows::io::{AsSocket as _, BorroedSocket as BorrowedOsHandle};
+use std::os::windows::io::{AsSocket as _, BorrowedSocket as BorrowedOsHandle};
 
 /// An IO stream to Arti, along with any supporting logic necessary to check it for readiness.
 ///
@@ -576,7 +576,7 @@ pub(crate) trait MioStream: Stream + mio::event::Source {}
 ///  * When notified that the handle is readable or writeable,
 ///    call [`RpcPoll::poll`].
 ///
-/// Depending on the the event loop's API, the type implementing `EventLoop`
+/// Depending on the event loop's API, the type implementing `EventLoop`
 /// might be a unit struct (if the event loop is global);
 /// or it might be a handle onto the event loop,
 /// or some kind of "event source" object if the event loop has those.
