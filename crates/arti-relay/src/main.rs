@@ -206,7 +206,7 @@ fn start_relay(_args: cli::RunArgs, global_args: cli::GlobalArgs) -> anyhow::Res
 
         // Configure tor-log-ratelim early before we begin logging.
         tor_log_ratelim::install_runtime(runtime.clone())
-            .context("Failed to initialze tor-log-ratelim")?;
+            .context("Failed to initialize tor-log-ratelim")?;
 
         let path_resolver = base_resolver();
         let relay =
@@ -286,8 +286,8 @@ async fn run_relay<R: Runtime>(
     // https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/3773#note_3367789
     // TODO: This is useful at info level while we're developing,
     // but the level should probably be lowered in the future.
-    tracing::debug!("RSA identity: {rsa_id}");
-    tracing::debug!("Ed25519 identity: {ed_id}");
+    tracing::info!("RSA identity: {rsa_id}");
+    tracing::info!("Ed25519 identity: {ed_id}");
 
     // TODO: I'd like to log the ntor key here as well so that we can build ntor circuits to the
     // relay.

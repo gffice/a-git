@@ -12,10 +12,15 @@ use crate::{
     err::DatabaseError,
 };
 
+/// Alias to force use of RandomState, regardless of features enabled in `weak_tables`.
+///
+/// See <https://github.com/tov/weak-table-rs/issues/23> for discussion.
+type WeakValueHash<K, V> = weak_table::WeakValueHashMap<K, V, std::hash::RandomState>;
+
 /// Representation of the store cache.
 ///
 /// The cache serves the purpose to not store the same document multiple times
-/// in memory, when multiple clients request it simultanously.
+/// in memory, when multiple clients request it simultaneously.
 ///
 /// It *DOES NOT* serve the purpose to reduce the amount of read system calls.
 /// We believe that SQLite and the operating system itself do a good job at
@@ -33,7 +38,7 @@ pub(super) struct StoreCache {
     ///
     /// We use a [`Mutex`] instead of an [`RwLock`](std::sync::RwLock), because
     /// we want to assure that a concurrent cache miss does not lead into two
-    /// simultanous database reads and copies into memory.
+    /// simultaneous database reads and copies into memory.
     data: Mutex<WeakValueHashMap<DocumentId, Weak<[u8]>>>,
 }
 
@@ -61,7 +66,7 @@ impl StoreCache {
     /// the same document in memory for a very short amount of time, based upon
     /// the number of worker threads we are using.  However, this is fine,
     /// given that reading from the store table is a large performance bottleneck.
-    /// Also, the number of simultanous copies that might be risked by that is
+    /// Also, the number of simultaneous copies that might be risked by that is
     /// limited to the amount of worker threads, which is usually very low
     /// compared to the number of async tasks, which might be in the thousands.
     pub(super) fn get(
@@ -81,7 +86,7 @@ impl StoreCache {
         //
         // We obtain the lock and check again if it has been added in the
         // meantime.  The idea is to only return one copy of it, not two
-        // simultanous ones.
+        // simultaneous ones.
         Ok(self.lock().entry(docid).or_insert(document))
     }
 
