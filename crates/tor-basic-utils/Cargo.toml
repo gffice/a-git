@@ -1,6 +1,6 @@
 [package]
 name = "tor-basic-utils"
-version = "0.40.0"
+version = "0.41.0"
 authors = ["The Tor Project, Inc.", "Nick Mathewson <nickm@torproject.org>"]
 edition = "2024"
 rust-version = "1.89"
@@ -34,7 +34,7 @@ serde-value = "0.7.0"
 serde_json = "1.0.50"
 
 [features]
-full = ["serde"]
+full = ["serde", "web-time-compat/full"]
 
 [package.metadata.docs.rs]
 all-features = true
