@@ -3,6 +3,7 @@
 //! This contains relay specific channel code. In other words, everything that a relay needs to
 //! establish a channel according to the Tor protocol.
 
+pub(crate) mod create_handler;
 pub(crate) mod handshake;
 pub(crate) mod initiator;
 pub(crate) mod responder;
@@ -32,9 +33,10 @@ use tor_llcrypto::pk::{
 use tor_relay_crypto::pk::RelayLinkSigningKeypair;
 use tor_rtcompat::{CertifiedConn, CoarseTimeProvider, SleepProvider, StreamOps};
 
-use crate::channel::AuthLogDigest;
 use crate::channel::handshake::VerifiedChannel;
+use crate::channel::{ClogDigest, SlogDigest};
 use crate::peer::PeerAddr;
+use crate::relay::CreateRequestHandler;
 use crate::relay::channel::handshake::{AUTHTYPE_ED25519_SHA256_RFC5705, RelayResponderHandshake};
 use crate::{Error, Result, channel::RelayInitiatorHandshake, memquota::ChannelAccount};
 
@@ -152,6 +154,7 @@ impl RelayChannelBuilder {
         my_addrs: Vec<IpAddr>,
         peer_target: &OwnedChanTarget,
         memquota: ChannelAccount,
+        create_request_handler: Arc<CreateRequestHandler>,
     ) -> RelayInitiatorHandshake<T, S>
     where
         T: AsyncRead + AsyncWrite + CertifiedConn + StreamOps + Send + Unpin + 'static,
@@ -164,10 +167,12 @@ impl RelayChannelBuilder {
             my_addrs,
             peer_target,
             memquota,
+            create_request_handler,
         )
     }
 
     /// Accept a new handshake over a TLS stream.
+    #[expect(clippy::too_many_arguments)]
     pub fn accept<T, S>(
         self,
         peer_addr: Sensitive<PeerAddr>,
@@ -176,6 +181,7 @@ impl RelayChannelBuilder {
         sleep_prov: S,
         auth_material: Arc<RelayChannelAuthMaterial>,
         memquota: ChannelAccount,
+        create_request_handler: Arc<CreateRequestHandler>,
     ) -> RelayResponderHandshake<T, S>
     where
         T: AsyncRead + AsyncWrite + CertifiedConn + StreamOps + Send + Unpin + 'static,
@@ -188,13 +194,13 @@ impl RelayChannelBuilder {
             sleep_prov,
             auth_material,
             memquota,
+            create_request_handler,
         )
     }
 }
 
 /// Channel authentication data. This is only relevant for a Relay to Relay channel which are
 /// authenticated using this buffet of bytes.
-#[derive(Debug)]
 pub(crate) struct ChannelAuthenticationData {
     /// Authentication method to use.
     pub(crate) link_auth: u16,
@@ -207,9 +213,9 @@ pub(crate) struct ChannelAuthenticationData {
     /// The responder KP_relayid_ed.
     pub(crate) sid_ed: [u8; 32],
     /// Initiator log SHA256 digest.
-    pub(crate) clog: AuthLogDigest,
+    pub(crate) clog: ClogDigest,
     /// Responder log SHA256 digest.
-    pub(crate) slog: AuthLogDigest,
+    pub(crate) slog: SlogDigest,
     /// SHA256 of responder's TLS certificate.
     pub(crate) scert: [u8; 32],
 }
@@ -247,8 +253,8 @@ impl ChannelAuthenticationData {
         body.extend_from_slice(&self.sid);
         body.extend_from_slice(&self.cid_ed);
         body.extend_from_slice(&self.sid_ed);
-        body.extend_from_slice(&self.slog);
-        body.extend_from_slice(&self.clog);
+        body.extend_from_slice(self.slog.as_ref());
+        body.extend_from_slice(self.clog.as_ref());
         body.extend_from_slice(&self.scert);
 
         // TLSSECRETS is built from the CID.
@@ -300,8 +306,8 @@ impl ChannelAuthenticationData {
     pub(crate) fn build_initiator<T, S>(
         auth_challenge_cell: &msg::AuthChallenge,
         auth_material: &Arc<RelayChannelAuthMaterial>,
-        clog: AuthLogDigest,
-        slog: AuthLogDigest,
+        clog: ClogDigest,
+        slog: SlogDigest,
         verified: &mut VerifiedChannel<T, S>,
         peer_cert_digest: [u8; 32],
     ) -> Result<ChannelAuthenticationData>
@@ -353,8 +359,8 @@ impl ChannelAuthenticationData {
     pub(crate) fn build_responder(
         initiator_auth_type: u16,
         auth_material: &Arc<RelayChannelAuthMaterial>,
-        clog: AuthLogDigest,
-        slog: AuthLogDigest,
+        clog: ClogDigest,
+        slog: SlogDigest,
         peer_rsa_id_digest: [u8; 32],
         peer_relayid_ed: Ed25519Identity,
         our_cert_digest: [u8; 32],

@@ -19,15 +19,17 @@ use tracing::trace;
 
 use tor_cell::chancell::msg;
 use tor_linkspec::OwnedChanTarget;
-use tor_rtcompat::{CertifiedConn, CoarseTimeProvider, SleepProvider, StreamOps};
+use tor_rtcompat::{CertifiedConn, CoarseTimeProvider, Runtime, SleepProvider, StreamOps};
 
 use crate::{
     ClockSkew, RelayChannelAuthMaterial, Result,
     channel::{
-        AuthLogDigest, Channel, Reactor,
+        Channel, ChannelMode, ClogDigest, Reactor, SlogDigest,
+        circmap::CircIdRange,
         handshake::{UnverifiedInitiatorChannel, VerifiedChannel},
     },
     peer::{PeerAddr, PeerInfo},
+    relay::CreateRequestHandler,
     relay::channel::ChannelAuthenticationData,
 };
 
@@ -44,13 +46,15 @@ pub struct UnverifiedInitiatorRelayChannel<
     /// AUTH_CHALLENGE cell received from the responder.
     pub(crate) auth_challenge_cell: msg::AuthChallenge,
     /// The SLOG digest.
-    pub(crate) slog_digest: AuthLogDigest,
+    pub(crate) slog_digest: SlogDigest,
     /// The netinfo cell received from the responder.
     pub(crate) netinfo_cell: msg::Netinfo,
     /// Our channel key material needed for authentication.
     pub(crate) auth_material: Arc<RelayChannelAuthMaterial>,
     /// Our advertised IP addresses for the final NETINFO
     pub(crate) my_addrs: Vec<IpAddr>,
+    /// Provided to each new channel so that they can handle CREATE* requests.
+    pub(crate) create_request_handler: Arc<CreateRequestHandler>,
 }
 
 impl<T, S> UnverifiedInitiatorRelayChannel<T, S>
@@ -95,6 +99,7 @@ where
             peer_tls_cert_digest,
             slog_digest: self.slog_digest,
             my_addrs,
+            create_request_handler: self.create_request_handler,
         })
     }
 
@@ -126,9 +131,11 @@ pub struct VerifiedInitiatorRelayChannel<
     /// The peer TLS certificate digest.
     peer_tls_cert_digest: [u8; 32],
     /// The SLOG digest.
-    slog_digest: AuthLogDigest,
+    slog_digest: SlogDigest,
     /// Our advertised IP addresses.
     my_addrs: Vec<IpAddr>,
+    /// Provided to each new channel so that they can handle CREATE* requests.
+    create_request_handler: Arc<CreateRequestHandler>,
 }
 
 impl<T, S> VerifiedInitiatorRelayChannel<T, S>
@@ -141,7 +148,10 @@ where
     ///
     /// The resulting channel is considered, by Tor protocol standard, an authenticated relay
     /// channel on which circuits can be opened.
-    pub async fn finish(mut self, peer_addr: PeerAddr) -> Result<(Arc<Channel>, Reactor<S>)> {
+    pub async fn finish(mut self, peer_addr: PeerAddr) -> Result<(Arc<Channel>, Reactor<S>)>
+    where
+        S: Runtime,
+    {
         // Send the CERTS cell.
         let certs = super::build_certs_cell(&self.auth_material, /* is_responder */ false);
         trace!(channel_id = %self.inner.unique_id, "Sending CERTS as initiator cell.");
@@ -153,7 +163,8 @@ where
         //
         // > The CLOG field is computed as the SHA-256 digest of all bytes sent within
         // > the TLS channel up to but not including the AUTHENTICATE cell.
-        let clog_digest = self.inner.framed_tls.codec_mut().take_send_log_digest()?;
+        let clog_digest =
+            ClogDigest::new(self.inner.framed_tls.codec_mut().take_send_log_digest()?);
 
         // Build the AUTHENTICATE cell.
         //
@@ -189,9 +200,14 @@ where
         let peer_info =
             MaybeSensitive::not_sensitive(PeerInfo::new(peer_addr, self.inner.relay_ids().clone()));
 
+        let channel_mode = ChannelMode::Relay {
+            circ_id_range: CircIdRange::High,
+            create_request_handler: self.create_request_handler,
+        };
+
         // Get a Channel and a Reactor.
         self.inner
-            .finish(&self.netinfo_cell, &self.my_addrs, peer_info)
+            .finish(&self.netinfo_cell, &self.my_addrs, peer_info, channel_mode)
             .await
     }
 }
