@@ -202,7 +202,7 @@ impl<R: Runtime> TorRelay<R> {
 
         // Init the channel manager.
         let config = ChanMgrConfig::new(inert.config.channel.clone())
-            .with_my_addrs(inert.config.relay.advertise.all_ips())
+            .with_my_addrs(inert.config.relay.advertise.all_addr())
             .with_auth_material(Arc::new(auth_material));
         let chanmgr = Arc::new(
             ChanMgr::new(
@@ -358,10 +358,16 @@ impl<R: Runtime> TorRelay<R> {
             let runtime = self.runtime.clone();
             let keymgr = self.keymgr.clone();
             let chanmgr = self.chanmgr.clone();
+            let create_request_handler = Arc::clone(&self.create_request_handler);
             async {
-                crate::tasks::crypto::rotate_keys_task(runtime, keymgr, chanmgr)
-                    .await
-                    .context("Failed to run key rotation task")
+                crate::tasks::crypto::rotate_keys_task(
+                    runtime,
+                    keymgr,
+                    chanmgr,
+                    create_request_handler,
+                )
+                .await
+                .context("Failed to run key rotation task")
             }
         });
 
