@@ -298,6 +298,7 @@ define_derive_deftly_module! {
 
             ${for fields {
                 ${when F_INTRO}
+                ${loop_exactly_1 "internal error, somehow not exactly one intro item!"}
                 kw == $F_KEYWORD
             }}
         }
@@ -1065,8 +1066,10 @@ define_derive_deftly! {
         }
 
         fn is_structural_keyword(kw: $P::KeywordRef<'_>) -> Option<$P::IsStructural> {
-            $NETDOC_PARSEABLE_TTYPE::is_structural_keyword(kw)
-                .or_else(|| <$SIGS_TYPE as $P::NetdocParseableSignatures>::is_item_keyword(kw).then_some($P::IsStructural))
+            $NETDOC_PARSEABLE_TTYPE::is_structural_keyword(kw).or_else(
+                || <$SIGS_TYPE as $P::NetdocParseableSignatures>
+                    ::is_item_keyword(kw).then_some($P::IsStructural)
+            )
         }
 
         fn from_items<'s>(
@@ -1212,6 +1215,10 @@ define_derive_deftly! {
     ///    unless the object also implements `ItemObjectParseable`.
     ///    Errors from parsing will all be collapsed into
     ///    [`ErrorProblem::ObjectInvalidData`].
+    ///
+    ///  * **`#[deftly(netdoc(skip))]**:
+    ///
+    ///    Do not parse this field; fill it in with `Default::default()` instead.
     export ItemValueParseable for struct, meta_quoted rigorous, expect items, beta_deftly:
 
     ${define P { $crate::parse2::internal_prelude }}
@@ -1298,6 +1305,9 @@ define_derive_deftly! {
                       (args_consume.into_remaining())
                       .map_err(|_| AE::Invalid)
                       .map_err(args_consume.error_handler(stringify!($fname)))?
+              } }
+              F_SKIP { {
+                  <$ftype as Default>::default()
               } }
             };
           )

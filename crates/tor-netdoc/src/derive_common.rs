@@ -288,7 +288,7 @@ define_derive_deftly_module! {
     ${defcond T_SIGNATURES false}
 
     // Predicates for the field kinds
-    ${defcond F_INTRO all(not(T_SIGNATURES), approx_equal($findex, 0))}
+    ${defcond F_INTRO approx_equal($findex, 0)}
     ${defcond F_SUBDOC fmeta(netdoc(subdoc))}
     ${defcond F_SIGNATURE T_SIGNATURES} // signatures section documents have only signature fields
 
@@ -348,7 +348,8 @@ define_derive_deftly_module! {
 
     ${defcond F_REST fmeta(netdoc(rest))}
     ${defcond F_OBJECT fmeta(netdoc(object))}
-    ${defcond F_NORMAL not(any(F_REST, F_OBJECT))}
+    ${defcond F_SKIP fmeta(netdoc(skip))}
+    ${defcond F_NORMAL not(any(F_REST, F_OBJECT, F_SKIP))}
 
     ${defcond T_IS_SIGNATURE tmeta(netdoc(signature))}
 }
