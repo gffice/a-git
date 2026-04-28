@@ -16,9 +16,10 @@ ADDED: `types::B16`, `types::B16U`
 ADDED: `types::Curve25519Public` impls `Deref`, `DerefMut`, `AsRef`, `AsMut`
 ADDED: `types::Iso8601TimeSp`, `Iso8601TimeSp` impl `AsRef`, `AsMut`
 ADDED: `types::SpFingerprint`, `Fingerprint`, `Base64Fingerprint`, `LongIdent`, impl `Hash`, `AsRef`, `AsMut`
+ADDED: `#[deftly(netdoc(skip))]` supported in `ItemValueParseable` and `ItemValueEncodable` derives
 ADDED: `types::Hostname`, `types::InternetHost`
 BREAKING: `types::Nickname`, `FromStr` error type is now `InvalidNickname`
-ADDED: `#[deftly(netdoc(skip))]` supported in `ItemValueParseable` and `ItemValueEncodable` derives
+BREAKING: `DirSource`: several field types changed; new `hostname` field
 ADDED: Encoding traits implemented for `Arc<T>`
 BREAKING: `netstatus::Preamble.consensus_method` and `.published` are now 1-element tuples.
 ADDED: `ItemValueEncodable` impl for `ConsensusMethods`
@@ -46,3 +47,17 @@ ADDED: Implement `NormalItemArgument` for `AddrPortPattern`
 ADDED: Implement `NetdocParseableFields` for `AddrPolicy`
 ADDED: `SpFingerprint` type
 ADDED: Implement `ItemArgumentParseable` for `RelayPlatform`
+ADDED: `RouterHashAccu` type
+ADDED: `RouterDescSignature` type
+ADDED: `RouterSigEd25519` type
+ADDED: `RouterDescSignatures` type
+ADDED: Implement `ItemArgument` for `tor_llcrypto::pk::ed25519::Signature`
+ADDED: Implement conversions from `tor_checkable` errors to `VerifyFailed`
+ADDED: `RetainedOrderVec`
+ADDED: `EmbeddedCert`
+ADDED: `DirSource` implements `ItemValueParseable` and `ItemValueEncodable` and has a `Constructor`
+BREAKING: `ConsensusVoterInfo` renamed to `ConsensusAuthorityEntry`
+BREAKING: `ConsensusVoterInfo`; several field types changed
+ADDED: `ConsensusVoterInfo`: `ItemValueParseable`, `ItemValueEncodable`, `Constructor`
+ADDED: `VoteAuthorityEntry`, `VoteAuthoritySection`
+ADDED: `SupersededAuthorityKey`, `ConsensusAuthoritySection`
