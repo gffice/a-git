@@ -239,6 +239,7 @@ dependencies = [
  "secmem-proc",
  "serde",
  "serde_json",
+ "syslog-tracing",
  "tempfile",
  "test-temp-dir",
  "thiserror 2.0.18",
@@ -1861,9 +1862,6 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 [[package]]
 name = "dependencies-bodge"
 version = "0.0.1"
-dependencies = [
- "security-framework",
-]
 
 [[package]]
 name = "der"
@@ -5643,9 +5641,9 @@ dependencies = [
 
 [[package]]
 name = "security-framework"
-version = "3.6.0"
+version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d17b898a6d6948c3a8ee4372c17cb384f90d2e6e912ef00895b14fd7ab54ec38"
+checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
 dependencies = [
  "bitflags 2.11.0",
  "core-foundation 0.10.1",
@@ -6291,6 +6289,17 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows",
+]
+
+[[package]]
+name = "syslog-tracing"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d349bc2df408b4bf656709a29643641cef7f1795d708f88b105c626a8f64f6e4"
+dependencies = [
+ "libc",
+ "tracing-core",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -7852,6 +7861,7 @@ dependencies = [
  "rand_core 0.9.5",
  "regex",
  "safelog",
+ "serde",
  "slotmap-careful",
  "smallvec",
  "static_assertions",
@@ -7878,6 +7888,7 @@ dependencies = [
  "tor-memquota",
  "tor-protover",
  "tor-relay-crypto",
+ "tor-rpcbase",
  "tor-rtcompat",
  "tor-rtmock",
  "tor-units",
