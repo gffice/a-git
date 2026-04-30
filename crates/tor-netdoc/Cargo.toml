@@ -79,7 +79,7 @@ hs-dir = ["hs-common", "__is_experimental"]
 # These are "document type" features in #2492's taxonomy but that ticket didn't mention them
 # by name, so we should have another consensus call for those.
 hs-client = ["hs-common"]
-hs-service = ["hs-common", "encode", "tor-cert/encode"]
+hs-service = ["hs-common", "encode"]
 hs-common = ["tor-hscrypto", "tor-linkspec", "tor-units"]
 # Testing only : expose code to parse inner layers of onion service descriptors.
 hsdesc-inner-docs = [
