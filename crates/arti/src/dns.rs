@@ -6,9 +6,7 @@
 
 use futures::lock::Mutex;
 use futures::stream::StreamExt;
-use hickory_proto::op::{
-    Message, Query, header::MessageType, op_code::OpCode, response_code::ResponseCode,
-};
+use hickory_proto::op::{Message, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType, rdata};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 use std::collections::HashMap;
@@ -170,13 +168,13 @@ where
     U: UdpSocket,
 {
     // if we can't parse the request, don't try to answer it.
-    let mut query = Message::from_bytes(packet)?;
-    let id = query.id();
-    let queries = query.queries();
+    let query = Message::from_bytes(packet)?;
+    let id = query.metadata.id;
+    let queries = query.queries;
     let isolation = DnsIsolationKey(socket_id, addr.ip());
 
     let request_id = {
-        let request_id = DnsCacheKey(isolation.clone(), queries.to_vec());
+        let request_id = DnsCacheKey(isolation.clone(), queries.clone());
 
         let response_target = DnsResponseTarget { id, addr, socket };
 
@@ -197,16 +195,12 @@ where
     let mut prefs = StreamPrefs::new();
     prefs.set_isolation(isolation);
 
-    let mut response = match do_query(tor_client, queries, &prefs).await {
+    let mut response = match do_query(tor_client, &queries, &prefs).await {
         Ok(answers) => {
-            let mut response = Message::new();
-            response
-                .set_message_type(MessageType::Response)
-                .set_op_code(OpCode::Query)
-                .set_recursion_desired(query.recursion_desired())
-                .set_recursion_available(true)
-                .add_queries(query.take_queries())
-                .add_answers(answers);
+            let mut response = Message::response(id, OpCode::Query);
+            response.metadata.recursion_desired = query.metadata.recursion_desired;
+            response.metadata.recursion_available = true;
+            response.add_queries(queries).add_answers(answers);
             // TODO maybe add some edns?
             response
         }
@@ -221,7 +215,7 @@ where
         .unwrap_or_default();
 
     for target in targets {
-        response.set_id(target.id);
+        response.metadata.id = target.id;
         // ignore errors, we want to reply to everybody
         let response = match response.to_bytes() {
             Ok(r) => r,
