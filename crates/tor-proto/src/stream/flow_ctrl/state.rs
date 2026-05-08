@@ -8,10 +8,10 @@ use tor_cell::relaycell::msg::AnyRelayMsg;
 use tor_cell::relaycell::{RelayMsg, UnparsedRelayMsg};
 
 use super::params::FlowCtrlParameters;
-use super::window::state::WindowFlowCtrl;
+use super::window::state::{HalfStreamWindowFlowCtrl, WindowFlowCtrl};
 use super::xon_xoff::reader::DrainRateRequest;
 #[cfg(feature = "flowctl-cc")]
-use super::xon_xoff::state::XonXoffFlowCtrl;
+use super::xon_xoff::state::{HalfStreamXonXoffFlowCtrl, XonXoffFlowCtrl};
 
 use crate::Result;
 use crate::congestion::sendme;
@@ -20,7 +20,7 @@ use crate::util::notify::NotifySender;
 /// Private internals of [`StreamFlowCtrl`].
 #[enum_dispatch::enum_dispatch]
 #[derive(Debug)]
-enum StreamFlowCtrlEnum {
+enum StreamFlowCtrlInner {
     /// "legacy" sendme-window-based flow control.
     WindowBased(WindowFlowCtrl),
     /// XON/XOFF flow control.
@@ -28,18 +28,23 @@ enum StreamFlowCtrlEnum {
     XonXoffBased(XonXoffFlowCtrl),
 }
 
-/// Manages flow control for a stream.
+/// Manages the circuit reactor's flow control for a stream.
+///
+/// Note that the flow control logic can be distributed across multiple parts of Arti.
+/// For example some flow control logic will exist in the circuit reactor,
+/// but other logic will exist in the stream's `DataStream`.
+/// So this doesn't include all flow control logic.
 #[derive(Debug)]
 pub(crate) struct StreamFlowCtrl {
     /// Private internal enum.
-    e: StreamFlowCtrlEnum,
+    inner: StreamFlowCtrlInner,
 }
 
 impl StreamFlowCtrl {
     /// Returns a new sendme-window-based [`StreamFlowCtrl`].
     pub(crate) fn new_window(window: sendme::StreamSendWindow) -> Self {
         Self {
-            e: StreamFlowCtrlEnum::WindowBased(WindowFlowCtrl::new(window)),
+            inner: StreamFlowCtrlInner::WindowBased(WindowFlowCtrl::new(window)),
         }
     }
 
@@ -52,7 +57,7 @@ impl StreamFlowCtrl {
         drain_rate_requester: NotifySender<DrainRateRequest>,
     ) -> Self {
         Self {
-            e: StreamFlowCtrlEnum::XonXoffBased(XonXoffFlowCtrl::new(
+            inner: StreamFlowCtrlInner::XonXoffBased(XonXoffFlowCtrl::new(
                 params,
                 use_sidechannel_mitigations,
                 rate_limit_updater,
@@ -60,43 +65,61 @@ impl StreamFlowCtrl {
             )),
         }
     }
+
+    /// Once this end of the stream is closed and the stream becomes a
+    /// half-stream (`HalfStream`),
+    /// this method will turn the flow control object into a version
+    /// that is designed to be used for half-streams.
+    pub(crate) fn half_stream(self) -> HalfStreamFlowCtrl {
+        let inner = match self.inner {
+            StreamFlowCtrlInner::WindowBased(x) => {
+                HalfStreamFlowCtrlInner::WindowBased(HalfStreamWindowFlowCtrl::new(x))
+            }
+            #[cfg(feature = "flowctl-cc")]
+            StreamFlowCtrlInner::XonXoffBased(x) => {
+                HalfStreamFlowCtrlInner::XonXoffBased(HalfStreamXonXoffFlowCtrl::new(x))
+            }
+        };
+
+        HalfStreamFlowCtrl { inner }
+    }
 }
 
 // forward all trait methods to the inner enum
 impl FlowCtrlHooks for StreamFlowCtrl {
     fn can_send<M: RelayMsg>(&self, msg: &M) -> bool {
-        self.e.can_send(msg)
+        self.inner.can_send(msg)
     }
 
     fn about_to_send(&mut self, msg: &AnyRelayMsg) -> Result<()> {
-        self.e.about_to_send(msg)
+        self.inner.about_to_send(msg)
     }
 
     fn put_for_incoming_sendme(&mut self, msg: UnparsedRelayMsg) -> Result<()> {
-        self.e.put_for_incoming_sendme(msg)
+        self.inner.put_for_incoming_sendme(msg)
     }
 
     fn handle_incoming_xon(&mut self, msg: UnparsedRelayMsg) -> Result<()> {
-        self.e.handle_incoming_xon(msg)
+        self.inner.handle_incoming_xon(msg)
     }
 
     fn handle_incoming_xoff(&mut self, msg: UnparsedRelayMsg) -> Result<()> {
-        self.e.handle_incoming_xoff(msg)
+        self.inner.handle_incoming_xoff(msg)
     }
 
     fn maybe_send_xon(&mut self, rate: XonKbpsEwma, buffer_len: usize) -> Result<Option<Xon>> {
-        self.e.maybe_send_xon(rate, buffer_len)
+        self.inner.maybe_send_xon(rate, buffer_len)
     }
 
     fn maybe_send_xoff(&mut self, buffer_len: usize) -> Result<Option<Xoff>> {
-        self.e.maybe_send_xoff(buffer_len)
+        self.inner.maybe_send_xoff(buffer_len)
     }
 }
 
 /// Methods that can be called on a [`StreamFlowCtrl`].
 ///
-/// We use a trait so that we can use `enum_dispatch` on the inner [`StreamFlowCtrlEnum`] enum.
-#[enum_dispatch::enum_dispatch(StreamFlowCtrlEnum)]
+/// We use a trait so that we can use `enum_dispatch` on the inner [`StreamFlowCtrlInner`] enum.
+#[enum_dispatch::enum_dispatch(StreamFlowCtrlInner)]
 pub(crate) trait FlowCtrlHooks {
     /// Whether this stream is ready to send `msg`.
     fn can_send<M: RelayMsg>(&self, msg: &M) -> bool;
@@ -145,6 +168,60 @@ pub(crate) trait FlowCtrlHooks {
     /// If we should, then returns the XOFF message that should be sent.
     /// Returns an error if XON/XOFF messages aren't supported for this type of flow control.
     fn maybe_send_xoff(&mut self, buffer_len: usize) -> Result<Option<Xoff>>;
+}
+
+/// Manages flow control for a half-stream (`HalfStream`).
+#[derive(Debug)]
+pub(crate) struct HalfStreamFlowCtrl {
+    /// Private internal enum.
+    inner: HalfStreamFlowCtrlInner,
+}
+
+/// Private internals of [`HalfStreamFlowCtrl`].
+#[enum_dispatch::enum_dispatch]
+#[derive(Debug)]
+enum HalfStreamFlowCtrlInner {
+    /// "legacy" sendme-window-based flow control.
+    WindowBased(HalfStreamWindowFlowCtrl),
+    /// XON/XOFF flow control.
+    #[cfg(feature = "flowctl-cc")]
+    XonXoffBased(HalfStreamXonXoffFlowCtrl),
+}
+
+/// Methods that can be called on a [`HalfStreamFlowCtrl`].
+///
+/// We use a trait so that we can use `enum_dispatch` on the inner [`HalfStreamFlowCtrlInner`] enum.
+/// While this may seem unnecessary since this trait currently only has two methods,
+/// it's consistent with the [`FlowCtrlHooks`] trait above.
+#[enum_dispatch::enum_dispatch(HalfStreamFlowCtrlInner)]
+pub(crate) trait HalfStreamFlowCtrlHooks {
+    /// Handle some number of dropped stream messages.
+    ///
+    /// We don't know what kinds of stream messages were dropped, only the number of them.
+    ///
+    /// This method exists because currently the stream entry may drop some incoming stream
+    /// messages and they would never be processed by this flow control object otherwise.
+    fn handle_incoming_dropped(&mut self, msg_count: u16) -> Result<()>;
+
+    /// Handle an incoming message.
+    ///
+    /// If it's a flow control message, it will be consumed and `None` will be returned.
+    /// Otherwise the original message will be returned.
+    ///
+    /// Takes the [`UnparsedRelayMsg`] so that we don't even try to decode it if we're not using the
+    /// correct type of flow control.
+    fn handle_incoming_msg(&mut self, msg: UnparsedRelayMsg) -> Result<Option<UnparsedRelayMsg>>;
+}
+
+// forward all trait methods to the inner enum
+impl HalfStreamFlowCtrlHooks for HalfStreamFlowCtrl {
+    fn handle_incoming_dropped(&mut self, msg_count: u16) -> Result<()> {
+        self.inner.handle_incoming_dropped(msg_count)
+    }
+
+    fn handle_incoming_msg(&mut self, msg: UnparsedRelayMsg) -> Result<Option<UnparsedRelayMsg>> {
+        self.inner.handle_incoming_msg(msg)
+    }
 }
 
 /// A newtype wrapper for a tor stream rate limit that makes the units explicit.

@@ -4,10 +4,9 @@
 //! we might still receive some cells.
 
 use crate::Result;
-use crate::congestion::sendme::{StreamRecvWindow, cmd_counts_towards_windows};
 use crate::stream::cmdcheck::{AnyCmdChecker, StreamStatus};
-use crate::stream::flow_ctrl::state::{FlowCtrlHooks, StreamFlowCtrl};
-use tor_cell::relaycell::{RelayCmd, UnparsedRelayMsg};
+use crate::stream::flow_ctrl::state::{HalfStreamFlowCtrl, HalfStreamFlowCtrlHooks};
+use tor_cell::relaycell::UnparsedRelayMsg;
 
 /// Type to track state of half-closed streams.
 ///
@@ -22,24 +21,16 @@ pub(crate) struct HalfStream {
     /// Flow control for this stream.
     ///
     /// Used to process incoming flow control messages (SENDME, XON, etc).
-    flow_control: StreamFlowCtrl,
-    /// Receive window for this stream. Used to detect whether we get too
-    /// many data cells.
-    recvw: StreamRecvWindow,
+    flow_control: HalfStreamFlowCtrl,
     /// Object to tell us which cells to accept on this stream.
     cmd_checker: AnyCmdChecker,
 }
 
 impl HalfStream {
     /// Create a new half-closed stream.
-    pub(crate) fn new(
-        flow_control: StreamFlowCtrl,
-        recvw: StreamRecvWindow,
-        cmd_checker: AnyCmdChecker,
-    ) -> Self {
+    pub(crate) fn new(flow_control: HalfStreamFlowCtrl, cmd_checker: AnyCmdChecker) -> Self {
         HalfStream {
             flow_control,
-            recvw,
             cmd_checker,
         }
     }
@@ -53,29 +44,12 @@ impl HalfStream {
     pub(crate) fn handle_msg(&mut self, msg: UnparsedRelayMsg) -> Result<StreamStatus> {
         use StreamStatus::*;
 
-        // We handle SENDME/XON/XOFF separately, and don't give it to the checker.
-        //
-        // TODO: this logic is the same as `CircHop::deliver_msg_to_stream`; we should refactor this
-        // if possible
-        match msg.cmd() {
-            RelayCmd::SENDME => {
-                self.flow_control.put_for_incoming_sendme(msg)?;
-                return Ok(Open);
-            }
-            RelayCmd::XON => {
-                self.flow_control.handle_incoming_xon(msg)?;
-                return Ok(Open);
-            }
-            RelayCmd::XOFF => {
-                self.flow_control.handle_incoming_xoff(msg)?;
-                return Ok(Open);
-            }
-            _ => {}
-        }
-
-        if cmd_counts_towards_windows(msg.cmd()) {
-            self.recvw.take()?;
-        }
+        let Some(msg) = self.flow_control.handle_incoming_msg(msg)? else {
+            // The flow control code consumed the message,
+            // which means that it was a flow control message.
+            // We don't give flow control messages to the checker below.
+            return Ok(Open);
+        };
 
         let status = self.cmd_checker.check_msg(&msg)?;
         self.cmd_checker.consume_checked_msg(msg)?;
@@ -99,10 +73,9 @@ mod test {
     #![allow(clippy::needless_pass_by_value)]
     //! <!-- @@ end test lint list maintained by maint/add_warning @@ -->
     use super::*;
-    use crate::{
-        client::stream::OutboundDataCmdChecker,
-        congestion::sendme::{StreamRecvWindow, StreamSendWindow},
-    };
+    use crate::stream::RECV_WINDOW_INIT;
+    use crate::stream::flow_ctrl::state::StreamFlowCtrl;
+    use crate::{client::stream::OutboundDataCmdChecker, congestion::sendme::StreamSendWindow};
     use rand::{CryptoRng, Rng};
     use tor_basic_utils::test_rng::testing_rng;
     use tor_cell::relaycell::{
@@ -132,8 +105,7 @@ mod test {
         let sendw = StreamSendWindow::new(450);
 
         let mut hs = HalfStream::new(
-            StreamFlowCtrl::new_window(sendw),
-            StreamRecvWindow::new(20),
+            StreamFlowCtrl::new_window(sendw).half_stream(),
             OutboundDataCmdChecker::new_any(),
         );
 
@@ -156,8 +128,7 @@ mod test {
 
     fn hs_new() -> HalfStream {
         HalfStream::new(
-            StreamFlowCtrl::new_window(StreamSendWindow::new(20)),
-            StreamRecvWindow::new(20),
+            StreamFlowCtrl::new_window(StreamSendWindow::new(20)).half_stream(),
             OutboundDataCmdChecker::new_any(),
         )
     }
@@ -171,9 +142,9 @@ mod test {
         hs.handle_msg(to_unparsed(&mut rng, msg::Connected::new_empty().into()))
             .unwrap();
 
-        // 20 data cells are okay.
+        // `RECV_WINDOW_INIT` (500) data cells are okay.
         let m = msg::Data::new(&b"this offer is unrepeatable"[..]).unwrap();
-        for _ in 0_u8..20 {
+        for _ in 0_u16..RECV_WINDOW_INIT {
             assert!(
                 hs.handle_msg(to_unparsed(&mut rng, m.clone().into()))
                     .is_ok()
@@ -216,8 +187,7 @@ mod test {
                 .unwrap();
         }
         let mut hs = HalfStream::new(
-            StreamFlowCtrl::new_window(StreamSendWindow::new(20)),
-            StreamRecvWindow::new(20),
+            StreamFlowCtrl::new_window(StreamSendWindow::new(20)).half_stream(),
             cmd_checker,
         );
         let e = hs

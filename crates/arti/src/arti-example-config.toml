@@ -580,6 +580,10 @@
 #hs_desc_fetch_attempts = 6
 #hs_intro_rend_attempts = 6
 
+# The period for which a hidden service directory cannot be queried for
+# the same descriptor ID again.
+#hs_dir_requery_interval = "15 min"
+
 # Rules for which addresses a client is willing to try to connect to over
 # the tor network.
 [address_filter]

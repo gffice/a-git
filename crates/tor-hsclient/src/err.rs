@@ -62,6 +62,14 @@ pub enum ConnError {
     #[error("hidden service has no introduction points usable by us")]
     NoUsableIntroPoints,
 
+    /// Cannot fetch the descriptor because we are rate-limited
+    ///
+    /// Returned if we do not have a descriptor for the service,
+    /// and we cannot download a new one because a rate-limit
+    /// is in place for all HsDirs.
+    #[error("cannot fetch descriptor (we are rate-limited)")]
+    NoUsableHsDirs,
+
     /// Unable to spawn
     #[error("Unable to spawn {spawning}")]
     Spawn {
@@ -128,6 +136,12 @@ pub enum DescriptorErrorDetail {
     /// Internal error
     #[error("{0}")]
     Bug(#[from] Bug),
+}
+
+impl From<tor_rtcompat::TimeoutError> for DescriptorErrorDetail {
+    fn from(_: tor_rtcompat::TimeoutError) -> Self {
+        Self::Timeout
+    }
 }
 
 /// Error that occurred making one attempt to connect to a hidden service using an IP and RP
@@ -365,6 +379,8 @@ impl HasKind for ConnError {
                     error!("bug: {}", bug.report());
                     bug.kind()
                 }),
+
+            CE::NoUsableHsDirs => EK::OnionServiceConnectionFailed,
 
             CE::Failed(attempts) => attempts
                 .sources()

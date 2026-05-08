@@ -667,9 +667,6 @@ impl CircHopOutbound {
 
         // We need to handle SENDME/XON/XOFF messages here, not in the stream's recv() method, or
         // else we'd never notice them if the stream isn't reading.
-        //
-        // TODO: this logic is the same as `HalfStream::handle_msg`; we should refactor this if
-        // possible
         match msg.cmd() {
             RelayCmd::SENDME => {
                 ent.put_for_incoming_sendme(msg)?;

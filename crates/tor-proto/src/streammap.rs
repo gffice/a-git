@@ -2,11 +2,9 @@
 
 mod halfstream;
 
-use crate::congestion::sendme;
-use crate::stream::RECV_WINDOW_INIT;
 use crate::stream::StreamMpscReceiver;
 use crate::stream::cmdcheck::AnyCmdChecker;
-use crate::stream::flow_ctrl::state::{FlowCtrlHooks, StreamFlowCtrl};
+use crate::stream::flow_ctrl::state::{FlowCtrlHooks, HalfStreamFlowCtrlHooks, StreamFlowCtrl};
 use crate::stream::queue::StreamQueueSender;
 use crate::util::stream_poll_set::{KeyAlreadyInsertedError, StreamPollSet};
 use crate::{Error, Result};
@@ -460,13 +458,12 @@ impl StreamMap {
                         ..
                     },
             } = ent;
-            // FIXME(eta): we don't copy the receive window, instead just creating a new one,
-            //             so a malicious peer can send us slightly more data than they should
-            //             be able to; see arti#230.
-            let mut recv_window = sendme::StreamRecvWindow::new(RECV_WINDOW_INIT);
-            recv_window.decrement_n(dropped)?;
+
+            let mut flow_ctrl = flow_ctrl.half_stream();
+            flow_ctrl.handle_incoming_dropped(dropped)?;
+
             // TODO: would be nice to avoid new_ref.
-            let half_stream = HalfStream::new(flow_ctrl, recv_window, cmd_checker);
+            let half_stream = HalfStream::new(flow_ctrl, cmd_checker);
             let explicitly_dropped = why == TR::StreamTargetClosed;
 
             let prev = self.closed_streams.insert(

@@ -679,6 +679,7 @@ mod test {
                 "address_filter.allow_onion_addrs",
                 "circuit_timing.hs_desc_fetch_attempts",
                 "circuit_timing.hs_intro_rend_attempts",
+                "circuit_timing.hs_dir_requery_interval",
             ],
         );
 
