@@ -53,6 +53,140 @@ We'll to separate them out so that they can (likely in the future)
 use a static data dump, or a restricted protocol,
 so that they don't need full internet access.
 
+## Computing votes
+
+See also:
+ - Everything in the spec under "Directory authority operation and formats"
+   through "serving bandwidth list files."
+ - The C tor manpage.
+ - The files dirvote.c and voteflags.c in C tor.
+ - The akashic records as preserved on the astral plane
+
+### Information required
+
+Here is a rough outline of the inputs that are needed in order to compute
+a vote as part of the consensus algorithm.
+
+- Configuration about how to contact this directory authority.
+  - Used to compute our `dir-source` and `contact` lines.
+  - This includes information on how to contact the authority _as a relay_.
+
+- A configured set of consensus parameters.
+  - Used to compute the `params` line.
+  - The operator should be able to configure parameters here even if the
+    software does not recognize them.
+
+- A configured voting schedule, information about where we are within
+  that schedule, and the current time.
+  - Used to compute the `published`, `valid-after`, `fresh-until`,
+    `valid-until`, and `voting-delay` lines.
+
+- A configured list of recommended versions for client and server software.
+  - Used to compute the `client-versions` and `server-versions` lines.
+  - Optional. If absent, we don't include the lines based on it.
+
+- A set of configured options to configure flag assignment:
+  - In C tor these include:
+    - AuthDirFastGuarantee
+    - AuthDirGuardBWGuarantee
+    - AuthDirListBadExits
+    - AuthDirListMiddleOnly
+    - AuthDirMaxServersPerAddr
+    - AuthDirVoteGuardBwThresholdFaction
+    - AuthDirVoteGuardGuaranteeTimeKnown
+    - AuthDirVoteGuardGuaranteeWFU
+    - AuthDirVoteStableGuaranteeMinUptime
+    - AuthDirVoteStableGuaranteeMTBF
+    - MinMeasuredBWsForAuthToIgnoreAdvertised
+    - MinUptimeHidServDirectoryV2
+
+- A set of options that control which relays are acceptable:
+  - The minimal allowable relay software version.
+  - The maximum number of relays per IPv4 address.
+    - Used to calculate the Sybil flag.
+  - For testing, a configuration flag to indicate whether relays with
+    private addresses are acceptable.
+  - (In C tor, these are used to reject descriptors as they are uploaded.)
+
+- A configured list of relay identities, address patterns,
+  and country codes that must receive special treatment.
+  - This special treatment can include the following (listed with the
+    equivalent C tor options):
+    - Assign the BadExit flag. (AuthDirBadExit, AuthDirBadExitCCs)
+    - Assign the MiddleOnly flag. (AuthDirMiddleOnly, AuthDirMiddleOnlyCCs)
+    - Assign the Guard flag. (AuthDirGuard)
+    - Do not assign the Valid flag. (AuthDirInvalid, AuthDirInvalidCCs)
+    - Do not include the relay in any votes. (AuthDirReject, AuthDirRejectCCs)
+      - In C tor this is also used to refuse votes as they arrive.
+
+- A **hardwired** set of recommended or required subprotocol capabilities.
+  - Used to produce `{recommended,required}-{client,relay}-protocols`.
+  - This is hardwired to prevent Very Bad Outcomes.
+
+- A bandwidth measurement file.
+  - Produced asynchronously by a bandwidth scanner like SBWS.
+  - Declares a measured bandwidth for each relay.
+  - Used to produce the `w=` line in each routerstatus, and the Fast flag.
+  - Used as an input for the Guard flag.
+  - Served directly via http.
+  - May be absent if we do not have an associated bandwidth authority.
+
+- Our own authority certificate, and the authority signing key
+  (`KS_auth_sign_rsa`) that it certifies.
+  - This is pasted into the vote verbatim; the key is used to sign it.
+
+- A set of router descriptors
+  - Uploaded by relays.
+  - Used to produce many microdescriptors, and many routerstatus elements.
+
+- The current state of the shared-random-value protocol.
+  - Persistent state.
+  - Based on our own commitment, and commitments/reveals from other dirauths.
+  - Used to calculate `shared-rand-*`
+
+- For each relay, a set of _persistent_ measurements.
+  - These measurements must be persistent across reboots.
+  - In C tor, the authority (running as a relay) measures these things itself.
+  - The measurements include:
+     - Whether we have been able to contact it recently (45 minutes according to
+       the spec), on all published OR ports.
+       - Used to compute the Running flag.
+     - A time-weighted Mean Time Between Failures (qv) for each relay.
+       - Used to compute the Stable flag.
+     - A Weighted Fractional Uptime (qv) for reach relay.
+       - Used as an input for the Guard flag.
+     - The time at which the relay first published a descriptor,
+       and its weighted time known (qv).
+       - Used as an input for the Guard flag.
+
+- A persistent key-pinning record of which relays' legacy RSA identity keys
+  (`KP_relayid_rsa`) are associated with which Ed25519 identity keys
+  (`KP_relayid_ed`).
+  - This is used to reject incoming descriptors that violate key pinning.
+    Technically, we do that before the vote algorithm.
+
+- Hopefully not a "guard fraction" file?
+  - I think this is deprecated and unused. It used to track how much of the
+    time for the last N months each relay had spent _as_ a guard.
+
+- Later, if we add support for consensus transparency (and why not),
+  a digest of our previous vote, and our previous consensus.
+   - This will need a spec.
+
+### Order of operations for computing a vote
+
+(Very rough!)
+
+- Remove rejected routers.
+  - (We have to do this first so that they don't influence the flag assignments.)
+- Compute thresholds for flag assignments
+  - (This uses percentiles on our measured observations to set thresholds
+    required to assign various flags, including Guard, Stable, Fast, etc)
+  - (Only some routers are counted here, based on whether they are running,
+    valid, etc.)
+- For each router, compute the routerstatus we want to include for it in our vote.
+  This includes generating microdescriptors and assigning flags.)
+
 ## deployment transition plan
 
 Directory consensus protocol means that

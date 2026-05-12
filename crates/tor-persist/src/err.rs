@@ -69,9 +69,6 @@ pub(crate) enum Action {
     /// We were trying to acquire the lock for the store.
     #[display("acquiring lock")]
     Locking,
-    /// We were trying to release the lock for the store.
-    #[display("releasing lock")]
-    Unlocking,
     /// We were trying to validate the storage and initialize the manager.
     #[display("constructing storage manager")]
     Initializing,

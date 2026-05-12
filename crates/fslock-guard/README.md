@@ -1,9 +1,9 @@
 # `fslock-guard` — A guard object to ensure we have an exclusive lock to a file
 
-This crate is a thin wrapper around [`fslock`], which uses [`flock`(2)] or
+This crate is a thin wrapper around [`File::lock`], which uses [`flock`(2)] or
 [`LockFileEx`] to acquire an advisory lock on the filesystem.
 
-We add two features that `fslock` does not (currently) have:
+We add two features that `File::lock` does not have:
 
  - We have a [`LockFileGuard`] type, which can be used to ensure that a lock is
    actually held until the guard is dropped.
@@ -11,6 +11,7 @@ We add two features that `fslock` does not (currently) have:
    removed and re-created on disk by someone else.  This check makes it safe to
    remove lockfiles.
 
+[`File::lock`]: std::fs::File::lock
 [`fslock`]: https://docs.rs/fslock/latest/fslock/index.html
 [`flock`(2)]: https://man7.org/linux/man-pages/man2/flock.2.html
 [`LockFileEx`]: https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex

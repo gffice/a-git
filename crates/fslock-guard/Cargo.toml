@@ -16,7 +16,6 @@ default = []
 full = []
 
 [dependencies]
-fslock = { version = "0.2.0", package = "fslock-arti-fork" }
 thiserror = "2"
 
 [dev-dependencies]
@@ -27,3 +26,4 @@ all-features = true
 
 [target.'cfg(windows)'.dependencies.winapi]
 version = "^0.3.8"
+features = ["fileapi"]

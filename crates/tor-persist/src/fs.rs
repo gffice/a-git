@@ -9,6 +9,7 @@ use crate::load_store;
 use crate::{Error, LockStatus, Result, StateMgr};
 use fs_mistrust::CheckedDir;
 use fs_mistrust::anon_home::PathExt as _;
+use fslock_guard::LockFileGuard;
 use futures::FutureExt;
 use oneshot_fused_workaround as oneshot;
 use serde::{Serialize, de::DeserializeOwned};
@@ -56,7 +57,7 @@ struct FsStateMgrInner {
     /// Directory in which we store state files.
     statepath: CheckedDir,
     /// Lockfile to achieve exclusive access to state files.
-    lockfile: Mutex<fslock::LockFile>,
+    lockfile: Mutex<Option<LockFileGuard>>,
     /// A oneshot sender that is used to alert other tasks when this lock is
     /// finally dropped.
     ///
@@ -93,31 +94,13 @@ impl FsStateMgr {
                     Resource::Directory { dir: dir.clone() },
                 )
             })?;
-        let lockpath = statepath.join("state.lock").map_err(|e| {
-            Error::new(
-                e,
-                Action::Initializing,
-                Resource::Directory { dir: dir.clone() },
-            )
-        })?;
-
-        let lockfile = Mutex::new(fslock::LockFile::open(&lockpath).map_err(|e| {
-            Error::new(
-                e,
-                Action::Initializing,
-                Resource::File {
-                    container: dir,
-                    file: "state.lock".into(),
-                },
-            )
-        })?);
 
         let (lock_dropped_tx, lock_dropped_rx) = oneshot::channel();
         let lock_dropped_rx = lock_dropped_rx.shared();
         Ok(FsStateMgr {
             inner: Arc::new(FsStateMgrInner {
                 statepath,
-                lockfile,
+                lockfile: Mutex::new(None),
                 lock_dropped_tx,
                 lock_dropped_rx,
             }),
@@ -209,37 +192,48 @@ impl StateMgr for FsStateMgr {
             .lockfile
             .lock()
             .expect("Poisoned lock on state lockfile");
-        lockfile.owns_lock()
+        lockfile.is_some()
     }
+
     fn try_lock(&self) -> Result<LockStatus> {
         let mut lockfile = self
             .inner
             .lockfile
             .lock()
             .expect("Poisoned lock on state lockfile");
-        if lockfile.owns_lock() {
-            Ok(LockStatus::AlreadyHeld)
-        } else if lockfile
-            .try_lock()
-            .map_err(|e| Error::new(e, Action::Locking, self.err_resource_lock()))?
-        {
+        if lockfile.is_some() {
+            return Ok(LockStatus::AlreadyHeld);
+        }
+        let lockpath = self.inner.statepath.join("state.lock").map_err(|e| {
+            Error::new(
+                e,
+                Action::Initializing,
+                Resource::Directory {
+                    dir: self.inner.statepath.as_path().to_owned(),
+                },
+            )
+        })?;
+
+        let guard = LockFileGuard::try_lock(lockpath.as_path())
+            .map_err(|e| Error::new(e, Action::Initializing, self.err_resource_lock()))?;
+        *lockfile = guard;
+        if lockfile.is_some() {
             self.clean(SystemTime::get());
             Ok(LockStatus::NewlyAcquired)
         } else {
             Ok(LockStatus::NoLock)
         }
     }
+
     fn unlock(&self) -> Result<()> {
         let mut lockfile = self
             .inner
             .lockfile
             .lock()
             .expect("Poisoned lock on state lockfile");
-        if lockfile.owns_lock() {
-            lockfile
-                .unlock()
-                .map_err(|e| Error::new(e, Action::Unlocking, self.err_resource_lock()))?;
-        }
+
+        // Dropping the guard will release the lock.
+        let _guard: Option<LockFileGuard> = lockfile.take();
         Ok(())
     }
     fn load<D>(&self, key: &str) -> Result<Option<D>>

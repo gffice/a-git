@@ -46,7 +46,7 @@
 #![deny(clippy::unused_async)]
 //! <!-- @@ end lint list maintained by maint/add_warning @@ -->
 
-use std::path::Path;
+use std::{fs, path::Path};
 
 /// A lock-file for which we hold the lock.
 ///
@@ -69,29 +69,43 @@ use std::path::Path;
 ///  * Cross-filesystem locking is broken on Linux before 2.6.12.
 #[derive(Debug)]
 pub struct LockFileGuard {
-    /// A locked [`fslock::LockFile`].
+    /// A [`File`](fs::File) with its exclusive lock held.
     ///
-    /// This `LockFile` instance will remain locked for as long as this
+    /// This `File` instance will remain locked for as long as this
     /// LockFileGuard exists.
-    locked: fslock::LockFile,
+    locked_file: fs::File,
 }
 
 impl LockFileGuard {
+    /// Try to open `path` with options suitable for using it as a lockfile,
+    /// creating it as necessary.
+    fn open<P>(path: P) -> Result<fs::File, std::io::Error>
+    where
+        P: AsRef<Path>,
+    {
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+    }
+
     /// Try to construct a new [`LockFileGuard`] representing a lock we hold on
     /// the file `path`.
     ///
     /// Blocks until we can get the lock.
-    pub fn lock<P>(path: P) -> Result<Self, fslock::Error>
+    pub fn lock<P>(path: P) -> Result<Self, std::io::Error>
     where
         P: AsRef<Path>,
     {
         let path = path.as_ref();
         loop {
-            let mut lockfile = fslock::LockFile::open(path)?;
-            lockfile.lock()?;
+            let file = Self::open(path)?;
+            file.lock()?;
 
-            if os::lockfile_has_path(&lockfile, path)? {
-                return Ok(Self { locked: lockfile });
+            if os::lockfile_has_path(&file, path)? {
+                return Ok(Self { locked_file: file });
             }
         }
     }
@@ -100,16 +114,23 @@ impl LockFileGuard {
     /// the file `path`.
     ///
     /// Does not block; returns Ok(None) if somebody else holds the lock.
-    pub fn try_lock<P>(path: P) -> Result<Option<Self>, fslock::Error>
+    pub fn try_lock<P>(path: P) -> Result<Option<Self>, std::io::Error>
     where
         P: AsRef<Path>,
     {
         let path = path.as_ref();
-        let mut lockfile = fslock::LockFile::open(path)?;
-        if lockfile.try_lock()? && os::lockfile_has_path(&lockfile, path)? {
-            return Ok(Some(Self { locked: lockfile }));
+        let file = Self::open(path)?;
+        match file.try_lock() {
+            Ok(()) => {
+                if os::lockfile_has_path(&file, path)? {
+                    Ok(Some(Self { locked_file: file }))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(e)) => Err(e),
         }
-        Ok(None)
     }
 
     /// Try to delete the lock file that we hold.
@@ -120,7 +141,7 @@ impl LockFileGuard {
         P: AsRef<Path>,
     {
         let path = path.as_ref();
-        if os::lockfile_has_path(&self.locked, path)? {
+        if os::lockfile_has_path(&self.locked_file, path)? {
             std::fs::remove_file(path)
         } else {
             Err(std::io::Error::other(MismatchedPathError {}))
@@ -135,10 +156,6 @@ impl LockFileGuard {
 #[derive(thiserror::Error, Debug, Clone)]
 #[error("Called delete_lock_file with a mismatched path.")]
 struct MismatchedPathError {}
-
-// Note: This requires AsFd and AsHandle implementations for `LockFile`.
-//  See https://github.com/brunoczim/fslock/pull/15
-// This is why we are using fslock-arti-fork in place of fslock.
 
 /// Platform module for locking protocol on Unix.
 ///
@@ -207,14 +224,12 @@ struct MismatchedPathError {}
 /// and then see that they have a stale file.
 #[cfg(unix)]
 mod os {
-    use std::{fs::File, os::fd::AsFd, os::unix::fs::MetadataExt as _, path::Path};
+    use std::{fs::File, os::unix::fs::MetadataExt as _, path::Path};
 
     /// Return true if `lf` currently exists with the given `path`, and false otherwise.
-    pub(crate) fn lockfile_has_path(lf: &fslock::LockFile, path: &Path) -> std::io::Result<bool> {
+    pub(crate) fn lockfile_has_path(lf: &File, path: &Path) -> std::io::Result<bool> {
         let m1 = std::fs::metadata(path)?;
-        // TODO: This does an unnecessary dup().
-        let f_dup = File::from(lf.as_fd().try_clone_to_owned()?);
-        let m2 = f_dup.metadata()?;
+        let m2 = lf.metadata()?;
 
         Ok(m1.ino() == m2.ino() && m1.dev() == m2.dev())
     }
@@ -227,13 +242,13 @@ mod os {
 /// determine if our assumptions hold.
 ///
 /// Here we assume as follows:
-/// * When `fslock` calls `CreateFileW`, it gets a `HANDLE` to an open file.
+/// * When `File::open` calls `CreateFileW`, it gets a `HANDLE` to an open file.
 ///   As we use them, the `HANDLE` behaves
 ///   similarly to the "fd" in the Unix argument above,
 ///   and the open file behaves similarly to the "open-file".
 ///   * We assume that any differences that exist in their behavior do not
 ///     affect our correctness above.
-/// * When `fslock` calls `LockFileEx`, and it completes successfully,
+/// * When `File::lock` calls `LockFileEx`, and it completes successfully,
 ///   we now have a lock on the file.
 ///   Only one lock can exist on a file at a time.
 /// * When we compare members of `handle.metadata()` and `path.metadata()`,
@@ -241,8 +256,9 @@ mod os {
 ///   the two files are truly the same.
 ///   * We rely on the property that a file cannot change its file_index while it is
 ///     open.
-/// * Deleting the lock file will actually work, since `fslock` opened it with
-///   FILE_SHARE_DELETE.
+/// * Deleting the lock file will actually work, since `File::open` opened it with
+///   FILE_SHARE_DELETE.  (This is the default according to the documentation
+///   for `OpenOptionsExt::share_mode`.)
 /// * When we delete the lock file, possibly-asynchronous ("deferred") deletion
 ///   definitely won't mean that the OS kernel violates our rule that no-one but the lockholder
 ///   is allowed to delete the file.
@@ -265,13 +281,21 @@ mod os {
     use winapi::um::fileapi::{BY_HANDLE_FILE_INFORMATION as Info, GetFileInformationByHandle};
 
     /// Return true if `lf` currently exists with the given `path`, and false otherwise.
-    pub(crate) fn lockfile_has_path(lf: &fslock::LockFile, path: &Path) -> std::io::Result<bool> {
+    pub(crate) fn lockfile_has_path(lf: &File, path: &Path) -> std::io::Result<bool> {
         let mut m1: MaybeUninit<Info> = MaybeUninit::uninit();
         let mut m2: MaybeUninit<Info> = MaybeUninit::uninit();
 
         let f2 = File::open(path)?;
 
+        // Note: we would like to just use the MetadataExt methods for index and
+        // volume serial number, but they are currently available only on nightly:
+        // https://github.com/rust-lang/rust/issues/63010
+        //
+        // If and when they stabilize at our MSRV, we can use them here instead.
+
         let (i1, i2) = unsafe {
+            // TODO: I am told that there is a GetFileInformationByHandleEx
+            // that can return 128-bit IDs.
             if GetFileInformationByHandle(lf.as_raw_handle() as _, m1.as_mut_ptr()) == 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -291,6 +315,22 @@ mod os {
         Ok(i1.nFileIndexHigh == i2.nFileIndexHigh
             && i1.nFileIndexLow == i2.nFileIndexLow
             && i1.dwVolumeSerialNumber == i2.dwVolumeSerialNumber)
+    }
+}
+
+/// Non-windows, non-unix implementation for lockfile_has_path.
+///
+/// For now, this implementation always reports an error.
+/// It exists so that we can build (but not run) on wasm.
+#[cfg(all(not(windows), not(unix)))]
+mod os {
+    use std::path::Path;
+
+    /// Return true if `lf` currently exists with the given `path`, and false otherwise.
+    pub(crate) fn lockfile_has_path(_lf: &std::fs::File, _path: &Path) -> std::io::Result<bool> {
+        Err(std::io::Error::other(
+            "fslock-guard does not support this operating system".to_string(),
+        ))
     }
 }
 

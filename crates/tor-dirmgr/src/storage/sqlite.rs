@@ -11,7 +11,7 @@ use crate::{Error, Result};
 
 use fs_mistrust::CheckedDir;
 use tor_basic_utils::PathExt as _;
-use tor_error::{into_internal, warn_report};
+use tor_error::{internal, into_internal, warn_report};
 use tor_netdoc::doc::authcert::AuthCertKeyIds;
 use tor_netdoc::doc::microdesc::MdDigest;
 use tor_netdoc::doc::netstatus::{ConsensusFlavor, Lifetime};
@@ -29,12 +29,37 @@ use std::result::Result as StdResult;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use fslock_guard::LockFileGuard;
 use rusqlite::{OpenFlags, OptionalExtension, Transaction, params};
 use time::OffsetDateTime;
 use tracing::{trace, warn};
 
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-use fslock::LockFile;
+/// Possible status of a lockfile.
+///
+/// (Sqlite does its own locking, but we would like to cover the blobs directory
+/// as well)
+enum LockFile {
+    /// We are not even trying to lock, but permitting write operations
+    /// regardless.
+    ///
+    /// This is the implementation we use for ephemeral testing databases.
+    /// Don't use it in production!
+    NotLocking,
+
+    /// We aren't locked.
+    ///
+    /// The provided path is the path to the lockfile that we will try to open if
+    /// we
+    Unlocked(PathBuf),
+
+    /// We have the lock.
+    ///
+    Locked(
+        // We never need to read this field; we only need to hold it so that the
+        // lock file isn't closed.
+        #[allow(unused)] LockFileGuard,
+    ),
+}
 
 /// Local directory cache using a Sqlite3 connection.
 pub(crate) struct SqliteStore {
@@ -47,37 +72,11 @@ pub(crate) struct SqliteStore {
     /// Lockfile to prevent concurrent write attempts from different
     /// processes.
     ///
-    /// If this is None we aren't using a lockfile.  Watch out!
+    /// If this is LockFile::NotLocking we aren't using a lockfile.  Watch out!
     ///
     /// (sqlite supports that with connection locking, but we want to
     /// be a little more coarse-grained here)
-    lockfile: Option<LockFile>,
-}
-
-/// Wasm-only: a non-implementation of LockFile.
-///
-/// TODO #2106 -- remove this when we migrate to use File::lock.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-struct LockFile(void::Void);
-
-#[allow(clippy::missing_docs_in_private_items)]
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-impl LockFile {
-    fn open<P: AsRef<Path>>(_path: P) -> std::io::Result<Self> {
-        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
-    }
-
-    fn try_lock(&mut self) -> std::io::Result<bool> {
-        void::unreachable(self.0)
-    }
-
-    fn unlock(&mut self) -> std::io::Result<()> {
-        void::unreachable(self.0)
-    }
-
-    fn owns_lock(&self) -> bool {
-        void::unreachable(self.0)
-    }
+    lockfile: LockFile,
 }
 
 /// # Some notes on blob consistency, and the lack thereof.
@@ -218,10 +217,19 @@ impl SqliteStore {
             }
         }
 
-        let mut lockfile = LockFile::open(&lockpath).map_err(Error::from_lockfile)?;
-        if !readonly && !lockfile.try_lock().map_err(Error::from_lockfile)? {
-            readonly = true; // we couldn't get the lock!
+        let lockfile = if !readonly {
+            match LockFileGuard::try_lock(&lockpath).map_err(Error::from_lockfile)? {
+                Some(guard) => LockFile::Locked(guard),
+                None => {
+                    // We couldn't get the lock.
+                    readonly = true;
+                    LockFile::Unlocked(lockpath)
+                }
+            }
+        } else {
+            LockFile::Unlocked(lockpath)
         };
+
         let flags = if readonly {
             OpenFlags::SQLITE_OPEN_READ_ONLY
         } else {
@@ -230,7 +238,7 @@ impl SqliteStore {
         let conn = rusqlite::Connection::open_with_flags(&sqlpath, flags)?;
         let mut store = SqliteStore::from_conn_internal(conn, blob_dir, readonly)?;
         store.sql_path = Some(sqlpath);
-        store.lockfile = Some(lockfile);
+        store.lockfile = lockfile;
         Ok(store)
     }
 
@@ -262,7 +270,7 @@ impl SqliteStore {
         let mut result = SqliteStore {
             conn,
             blob_dir,
-            lockfile: None,
+            lockfile: LockFile::NotLocking,
             sql_path: None,
         };
 
@@ -563,39 +571,39 @@ impl SqliteStore {
 impl Store for SqliteStore {
     fn is_readonly(&self) -> bool {
         match &self.lockfile {
-            Some(f) => !f.owns_lock(),
-            None => false,
+            LockFile::NotLocking => false, // no locks used; we can always write.
+            LockFile::Unlocked(_) => true, // lock in use but we don't have it; can't write.
+            LockFile::Locked(_) => false,  // we have the lock; we can write.
         }
     }
+
     fn upgrade_to_readwrite(&mut self) -> Result<bool> {
         let Some(sql_path) = self.sql_path.as_ref() else {
+            // This is an ephemeral database with no disk representation.
             return Ok(true);
         };
 
-        if self.is_readonly() {
-            let lf = self
-                .lockfile
-                .as_mut()
-                .expect("No lockfile open; cannot upgrade to read-write storage");
-            if !lf.try_lock().map_err(Error::from_lockfile)? {
-                // Somebody else has the lock.
-                return Ok(false);
+        let lockpath = match &self.lockfile {
+            LockFile::NotLocking => {
+                // This should be unreachable.
+                return Err(
+                    internal!("No lockfile open; cannot upgrade to read-write storage").into(),
+                );
             }
-            match rusqlite::Connection::open(sql_path) {
-                Ok(conn) => {
-                    self.conn = conn;
-                }
-                Err(e) => {
-                    if let Err(e2) = lf.unlock() {
-                        warn_report!(
-                            e2,
-                            "Unable to release lock file while upgrading DB to read/write"
-                        );
-                    }
-                    return Err(e.into());
-                }
-            }
-        }
+            LockFile::Locked(_) => return Ok(true),
+            LockFile::Unlocked(path) => path,
+        };
+        // We aren't locked. Try to fix that.
+        let Some(guard) = LockFileGuard::try_lock(lockpath).map_err(Error::from_lockfile)? else {
+            // Somebody else has the lock.
+            return Ok(false);
+        };
+
+        // Open a fresh RW sql connection. If it fails, we'll unlock the guard
+        // and remain in our old state.
+        let new_conn = rusqlite::Connection::open(sql_path)?;
+        self.conn = new_conn;
+        self.lockfile = LockFile::Locked(guard);
         Ok(true)
     }
     fn expire_all(&mut self, expiration: &ExpirationConfig) -> Result<()> {
@@ -1822,7 +1830,7 @@ pub(crate) mod test {
         {
             let mut store = SqliteStore::from_path_and_mistrust(tmp.path(), &mistrust, false)?;
             assert!(tmp.path().join("dir_blobs").is_dir());
-            assert!(store.lockfile.is_some());
+            assert!(matches!(&store.lockfile, LockFile::Locked(_)));
             assert!(!store.is_readonly());
             assert!(store.upgrade_to_readwrite()?); // no-op.
         }
