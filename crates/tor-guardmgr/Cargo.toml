@@ -42,7 +42,7 @@ experimental = ["testing"]
 # Support for using bridges as a client. Note that this is not the same as
 # the pt-client feature, since here we are not concerned with
 # pluggable transports necessarily.
-bridge-client = ["tor-netdoc/routerdesc", "tor-protover"]
+bridge-client = ["tor-protover"]
 # Support for pluggable transports.
 pt-client = ["bridge-client", "tor-linkspec/pt-client"]
 # Vanguards support
@@ -75,7 +75,7 @@ num_enum = "0.7"
 oneshot-fused-workaround = { path = "../oneshot-fused-workaround", version = "0.6.0" }
 pin-project = "1"
 postage = { version = "0.5.0", default-features = false, features = ["futures-traits"] }
-rand = "0.9.1"
+rand = "0.10.1"
 safelog = { path = "../safelog", version = "0.8.2" }
 serde = { version = "1.0.103", features = ["derive"] }
 strum = { version = "0.28.0", features = ["derive"] }
