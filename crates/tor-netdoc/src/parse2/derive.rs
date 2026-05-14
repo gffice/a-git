@@ -226,7 +226,7 @@ define_derive_deftly_module! {
         ${for fields {
           ${when F_FLATTEN}
 
-          if $ftype::is_item_keyword(kw) {
+          if <$ftype>::is_item_keyword(kw) {
               dtrace!(${concat "is flatten in " $fname}, kw);
               let item = $THIS_ITEM;
               <$ftype as NetdocParseableFields>::accumulate_item($F_ACCUMULATE_VAR, item)?;
@@ -1306,7 +1306,7 @@ define_derive_deftly! {
                               return Err(EP::ObjectIncorrectLabel)
                           }
                       } else {
-                          selector.check_label(object.label())?;
+                          selector.${paste_spanned $fname check_label}(object.label())?;
                       }}
                       ${if fmeta(netdoc(with)) {
                           ${fmeta(netdoc(with)) as path}::${paste_spanned $fname try_from}
