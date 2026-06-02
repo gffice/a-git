@@ -115,9 +115,15 @@ pub struct RouterDesc {
 
     /// `identity-ed25519` --- Specify the router's ed25519 identity.
     ///
-    /// * `identity-ed25519\n<certificate object>`
-    /// * Exactly once, in second position in document.
-    pub identity_ed25519: tor_cert::Ed25519Cert,
+    /// <https://spec.torproject.org/dir-spec/server-descriptor-format.html#item:identity-ed25519>
+    pub identity_ed25519: EmbeddedCert<Ed25519IdentityCert, KeyUnknownCert>,
+
+    /// `master-key-ed25519` --- Redundantly specify the router's ed25519 identity.
+    ///
+    /// * `master-key-ed25519 <master key>`
+    /// * Exactly once.
+    // TODO DIRAUTH when implementing verification, don't forget to check this!
+    pub master_key_ed25519: Ed25519Public,
 
     /// `bandwidth` --- Report router's network bandwidth.
     ///
@@ -446,9 +452,11 @@ impl RouterDesc {
 
     /// Return a reference to this relay's Ed25519 identity.
     pub fn ed_identity(&self) -> &Ed25519Identity {
-        self.identity_ed25519
-            .signing_key()
-            .expect("No ed25519 identity key on identity cert")
+        &self
+            .identity_ed25519
+            .get()
+            .expect("ed25519 identity cert should be verified")
+            .id_ed25519
     }
 
     /// Return a reference to the list of subprotocol versions supported by this
@@ -562,7 +570,19 @@ impl RouterDesc {
         let start_offset = header.required(ROUTER)?.offset_in(s).unwrap();
 
         // ed25519 identity and signing key.
-        let (identity_cert, ed25519_signing_key) = {
+        //
+        // Small digression: This is terrible.  We return a tuple containing
+        // a KeyUnknownCert and an UncheckedCert.  This is because of a parse2
+        // and legacy incongruence.  For parse2, we need the KeyUnknownCert
+        // to properly include it into EmbeddedCert, whereas the legacy parser
+        // will need an UncheckedCert because the verification chain is
+        // performed at the end.  Because tor-cert's method all consume self,
+        // we can not go backwards, meaning we have to store two separate
+        // copies.  It is also not possible to do the conversion to
+        // UncheckedCert later, because then we lose the error context returned
+        // in EK::BadObjectVal if the signed-by extension is missing.
+        //
+        let (ku_identity_cert, identity_cert, ed25519_signing_key) = {
             let cert_tok = header.required(IDENTITY_ED25519)?;
             // Unwrap should be safe because above `required` call should
             // return `Error::MissingToken` if `IDENTITY_ED25519` is not `Ok`
@@ -572,17 +592,16 @@ impl RouterDesc {
                     .with_msg("identity-ed25519")
                     .at_pos(cert_tok.pos()));
             }
-            let cert: tor_cert::UncheckedCert = cert_tok
+            let ku_cert = cert_tok
                 .parse_obj::<UnvalidatedEdCert>("ED25519 CERT")?
                 .check_cert_type(tor_cert::CertType::IDENTITY_V_SIGNING)?
-                .into_unchecked()
-                .should_have_signing_key()
-                .map_err(|err| {
-                    EK::BadObjectVal
-                        .err()
-                        .with_source(err)
-                        .at_pos(cert_tok.pos())
-                })?;
+                .into_unchecked();
+            let cert = ku_cert.clone().should_have_signing_key().map_err(|err| {
+                EK::BadObjectVal
+                    .err()
+                    .with_source(err)
+                    .at_pos(cert_tok.pos())
+            })?;
             let sk = *cert.peek_subject_key().as_ed25519().ok_or_else(|| {
                 EK::BadObjectVal
                     .at_pos(cert_tok.pos())
@@ -593,12 +612,12 @@ impl RouterDesc {
                     .at_pos(cert_tok.pos())
                     .with_msg("invalid ed25519 signing key")
             })?;
-            (cert, sk)
+            (ku_cert, cert, sk)
         };
 
         // master-key-ed25519: required, and should match certificate.
         #[allow(unexpected_cfgs)]
-        {
+        let ed25519_identity_key = {
             let master_key_tok = body.required(MASTER_KEY_ED25519)?;
             let ed_id: Ed25519Public = master_key_tok.parse_arg(0)?;
             let ed_id: ll::pk::ed25519::Ed25519Identity = ed_id.into();
@@ -608,7 +627,8 @@ impl RouterDesc {
                     .at_pos(master_key_tok.pos())
                     .with_msg("master-key-ed25519 does not match key in identity-ed25519"));
             }
-        }
+            ed_id
+        };
 
         // Legacy RSA identity
         let rsa_identity_key: ll::pk::rsa::PublicKey = body
@@ -923,7 +943,14 @@ impl RouterDesc {
                 socksport: 0,
                 dirport,
             },
-            identity_ed25519: identity_cert,
+            identity_ed25519: EmbeddedCert::new(
+                Ed25519IdentityCert {
+                    id_ed25519: ed25519_identity_key,
+                    sign_ed25519: ed25519_signing_key.into(),
+                },
+                ku_identity_cert,
+            ),
+            master_key_ed25519: ed25519_identity_key.into(),
             bandwidth: Default::default(),
             platform,
             published,
