@@ -66,7 +66,7 @@ use crate::doc::authcert::EncodedAuthCert;
 
 use crate::doc::authcert::{self, AuthCert, AuthCertKeyIds};
 use crate::encode::{
-    ItemArgument, ItemEncoder, ItemValueEncodable, NetdocEncodable, NetdocEncoder,
+    EncodeOrd, ItemArgument, ItemEncoder, ItemValueEncodable, NetdocEncodable, NetdocEncoder,
 };
 use crate::parse::keyword::Keyword;
 use crate::parse::parser::{Section, SectionRules, SectionRulesBuilder};
@@ -1990,7 +1990,7 @@ mod proto_statuses_parse2_encode {
             fn encode_fields(&self, out: &mut NetdocEncoder) -> Result<(), Bug> {
               $(
                 self.$cr.$rr.write_item_value_onto(
-                    out.item(stringify!([<$rr _ $cr _protocols>]))
+                    out.item(concat!(stringify!($rr), "-", stringify!($cr), "-protocols"))
                 )?;
               )*
                 Ok(())
@@ -1999,10 +1999,10 @@ mod proto_statuses_parse2_encode {
     } } }
 
     impl_proto_statuses! {
-        required client;
-        required relay;
         recommended client;
         recommended relay;
+        required client;
+        required relay;
     }
 }
 
@@ -2082,6 +2082,13 @@ impl Signature {
                 }
             }
         }
+    }
+}
+
+impl EncodeOrd for Signature {
+    fn encode_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let k: for<'s> fn(&'_ Signature) -> (&'_ _, &'_ _) = |s| (&s.key_ids, &s.signature);
+        Ord::cmp(&k(self), &k(other))
     }
 }
 

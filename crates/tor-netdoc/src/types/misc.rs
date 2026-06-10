@@ -25,7 +25,8 @@ pub use fingerprint::{Base64Fingerprint, Fingerprint};
 pub use identified_digest::{DigestName, IdentifiedDigest};
 
 pub use ignored_impl::{
-    Ignored, IgnoredItemOrObjectValue, NoMoreArguments, NotPresent, NotPresentEachValue,
+    Ignored, IgnoredItemOrObjectValue, ItemPresent, NoMoreArguments, NotPresent,
+    NotPresentEachValue,
 };
 
 use crate::NormalItemArgument;
@@ -106,6 +107,9 @@ define_derive_deftly_module! {
         }
     }
 
+    // TODO: This implementation is probably a bug, as it forbids to derive
+    // Transparent on types like `struct Foo<T>(T)`, namely `T` not being
+    // covered by something else, like `PhantomData<T>` or `Vec<T>`.
     impl<$tgens> From<$ttype> for $ftype {
         fn from(self_: $ttype) -> $ftype {
             self_.$fname
@@ -683,6 +687,72 @@ mod ignored_impl {
     #[allow(clippy::exhaustive_structs)]
     pub struct NoMoreArguments;
 
+    /// An item that only matters in terms of presence of absence.
+    ///
+    /// Useful for items such as `tunnelled-dir-server` where the mere presence
+    /// implies a truthful value.
+    ///
+    /// This wrapper implements [`ItemValueParseable`] and [`ItemValueEncodable`]
+    /// rejecting all arguments and objects and just expecting/emitting the
+    /// keyword (or not).
+    ///
+    /// # Examples
+    ///
+    /// The following shows an except from a hypothetical netdoc with a
+    /// [`ItemPresent`] item.
+    ///
+    /// ```
+    /// use derive_deftly::Deftly;
+    /// use tor_netdoc::types::*;
+    /// use tor_netdoc::parse2::*;
+    /// use tor_netdoc::*;
+    ///
+    /// #[derive(Debug, Default)]
+    /// struct Hello;
+    ///
+    /// #[derive(Deftly, Debug)]
+    /// #[derive_deftly(NetdocParseable)]
+    /// struct TestDoc {
+    ///     intro: Ignored,
+    ///     hello: Option<ItemPresent<Hello>>,
+    /// }
+    ///
+    /// // hello is not present.
+    /// let doc = parse_netdoc::<TestDoc>(&ParseInput::new("intro\n", "")).unwrap();
+    /// assert!(doc.hello.is_none());
+    ///
+    /// // hello is present.
+    /// let doc = parse_netdoc::<TestDoc>(&ParseInput::new("intro\nhello\n", "")).unwrap();
+    /// assert!(doc.hello.is_some());
+    ///
+    /// // hello has arguments which are ignored.
+    /// let doc = parse_netdoc::<TestDoc>(&ParseInput::new("intro\nhello world\n", "")).unwrap();
+    /// assert!(doc.hello.is_some());
+    ///
+    /// // hello is present twice which is not allowed.
+    /// let doc = parse_netdoc::<TestDoc>(&ParseInput::new("intro\nhello\nhello\n", "")).unwrap_err();
+    /// ```
+    //
+    // We cannot derive Transparent here, because it is not possible to
+    // implement `From<ItemPresent<T>> for T` due to orphan rule.
+    //
+    // Otherwise, a downstream crate could for example implement
+    // `From<ItemPresent<U>> for U` with `U` being a locally defined type,
+    // leading to a conflicting implementation.  A solution would be to cover
+    // `T` behind another generic type such as `PhantomData`, as this can't be
+    // a type in a downstream crate, but that level of indirection feels wrong.
+    #[derive(Debug, Copy, Clone, Default, Ord, PartialOrd, Eq, PartialEq, Hash)]
+    //
+    #[derive(
+        derive_more::From,
+        derive_more::Deref,
+        derive_more::DerefMut,
+        derive_more::AsRef,
+        derive_more::AsMut,
+    )]
+    #[allow(clippy::exhaustive_structs)]
+    pub struct ItemPresent<T: Default>(pub T);
+
     impl ItemSetMethods for P2MultiplicitySelector<NotPresent> {
         type Each = NotPresentEachValue;
         type Field = NotPresent;
@@ -853,6 +923,20 @@ mod ignored_impl {
             Ok(())
         }
     }
+
+    impl<T: Default> ItemValueParseable for ItemPresent<T> {
+        fn from_unparsed(item: UnparsedItem<'_>) -> StdResult<Self, EP> {
+            item.check_no_object()?;
+            Ok(Self::default())
+        }
+    }
+
+    impl<T: Default> ItemValueEncodable for ItemPresent<T> {
+        fn write_item_value_onto(&self, out: ItemEncoder) -> StdResult<(), Bug> {
+            out.finish();
+            Ok(())
+        }
+    }
 }
 
 // ============================================================
@@ -987,6 +1071,93 @@ impl<T: PartialOrd> PartialOrd for Unknown<T> {
         }
     }
 }
+
+// ============================================================
+
+/// A finite floating point number
+///
+/// Suitable for `stats` items in voites' routerstatus entries:
+/// <https://spec.torproject.org/dir-spec/consensus-formats.html#item:stats>
+///
+/// Invariants:
+///
+///  * Is finite.  (So not NaN or Inf.)  Might be denormal.
+///
+/// String representation:
+///
+///  * Parses any valid C-like notation.
+///
+///  * Never uses exponential notation to display.
+///
+///  * Output can be rather large, up to 326 characters!
+///    This is a spec bug.  The spec forbids us from using exponential notation.
+///    <https://gitlab.torproject.org/tpo/core/torspec/-/work_items/416>
+///
+/// We may to change this in the future to use exponentials notation for output.
+/// See <https://gitlab.torproject.org/tpo/core/torspec/-/work_items/416>
+//
+// TODO torspec#416 Consider replacing our F64Finite with finite f64 newtype from some crate
+//
+// What a palaver!
+//
+// This type is here rather than in rs.rs, in case similar things appears in other documents.
+#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)] //
+#[derive(derive_more::Deref, derive_more::Into, derive_more::Display)]
+pub struct F64Finite(f64);
+
+/// Error converting an [`F64Finite`] from an `f64`: the value wasn't finite
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error, amplify::Getters)]
+#[error("FP value {} ({bits:#x}) is not finite", f64::from_bits(self.bits))]
+pub struct F64FiniteError {
+    /// The raw bits (as from [`f64::to_bits`])
+    //
+    // We store it this way rather than as `f64` so that `Eq` etc. make sense.
+    bits: u64,
+}
+
+impl TryFrom<f64> for F64Finite {
+    type Error = F64FiniteError;
+
+    fn try_from(v: f64) -> Result<Self, F64FiniteError> {
+        v.is_finite()
+            .then_some(F64Finite(v))
+            .ok_or_else(|| F64FiniteError { bits: v.to_bits() })
+    }
+}
+
+/// Error parsing [`F64Finite`] from a string
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum F64FiniteParseError {
+    /// Syntax error
+    #[error("syntax error")]
+    Syntax(#[from] std::num::ParseFloatError),
+
+    /// Value is not finite
+    #[error("bad value")]
+    NotFinite(#[from] F64FiniteError),
+}
+
+impl FromStr for F64Finite {
+    type Err = F64FiniteParseError;
+
+    fn from_str(s: &str) -> StdResult<Self, F64FiniteParseError> {
+        Ok(s.parse::<f64>()?.try_into()?)
+    }
+}
+
+impl Eq for F64Finite {}
+
+#[allow(clippy::derive_ord_xor_partial_ord)]
+impl Ord for F64Finite {
+    fn cmp(&self, other: &F64Finite) -> cmp::Ordering {
+        self.0
+            .partial_cmp(&other.0)
+            .expect("finite f64 partial_cmp gave None")
+    }
+}
+
+impl NormalItemArgument for F64Finite {}
 
 // ============================================================
 
@@ -2441,7 +2612,12 @@ mod test {
     use tor_llcrypto::pk::ed25519::{self, Ed25519Identity, Ed25519PublicKey};
 
     use super::*;
-    use crate::{Pos, Result, parse2::VerifyFailed, types::EmbeddedCert};
+    use crate::{
+        Pos, Result,
+        encode::NetdocEncodable,
+        parse2::{ErrorProblem, ParseInput, VerifyFailed},
+        types::EmbeddedCert,
+    };
 
     /// Decode s as a multi-line base64 string, ignoring ascii whitespace.
     fn base64_decode_ignore_ws(s: &str) -> std::result::Result<Vec<u8>, base64ct::Error> {
@@ -2944,6 +3120,52 @@ mod test {
         assert!(NumericBoolean::from_str("10000").is_err());
     }
 
+    #[test]
+    fn f64_finite() {
+        let normalise_string = |i: &str, o: &str| {
+            let v: F64Finite = i.parse().expect(i);
+            assert_eq!(v.to_string(), o, "i={i:?}");
+        };
+        let roundtrip_string = |s: &str| normalise_string(s, s);
+        let roundtrip_value = |i: f64| {
+            let v: F64Finite = i.try_into().unwrap();
+            let s = v.to_string();
+            let o: F64Finite = s.parse().expect(&s);
+            assert_eq!(v, o, "{i:?} {s}");
+            assert_eq!(v.to_bits(), o.to_bits(), "{i:?} {s}");
+        };
+        let error_string = |s: &str| {
+            let _: F64FiniteParseError = s.parse::<F64Finite>().expect_err(s);
+        };
+
+        roundtrip_string("0");
+        roundtrip_string("0.5");
+        roundtrip_string("1");
+        roundtrip_string("42");
+        roundtrip_string("9007199254740991"); // f64::MAX_EXACT_INTEGER (as per Rust 1.96.0)
+        normalise_string("1e3", "1000");
+
+        roundtrip_value(f64::EPSILON);
+        roundtrip_value(f64::EPSILON + 1.0);
+        roundtrip_value(f64::MIN);
+        roundtrip_value(f64::MIN_POSITIVE);
+        roundtrip_value(-f64::MIN_POSITIVE);
+        roundtrip_value(f64::MAX);
+
+        error_string(&f64::NAN.to_string());
+        error_string(&f64::INFINITY.to_string());
+        error_string("");
+        error_string("garbage");
+
+        // TODO torspec#416 these ought to be more reasonable, but this is what it does now:
+        roundtrip_string(
+            "0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000022250738585072014",
+        ); // MIN_POSITIVE
+        roundtrip_string(
+            "179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        ); // MAX
+    }
+
     /// Test that ensures SpFingerprint matches the 10x4 requirement.
     #[test]
     fn sp_fingerprint() {
@@ -3001,6 +3223,83 @@ mod test {
             parse2(&vec!["ZZZZ"; 10].join(" ")).unwrap_err(),
             ErrorProblem::InvalidArgument { .. }
         ));
+    }
+
+    /// Verifies the parsing of [`ItemPresent`].
+    #[test]
+    fn item_present_parse2() {
+        #[derive(Default)]
+        struct Token;
+
+        #[derive(Deftly)]
+        #[derive_deftly(NetdocParseable)]
+        struct TestDoc {
+            #[allow(unused)]
+            intro: Ignored,
+            foo: Option<ItemPresent<Token>>,
+        }
+
+        // The test cases with their respective result; boolean indicating that
+        // it was present.
+        let tests = [
+            // Test valid present.
+            ("intro\nfoo\n", Ok(true)),
+            // Test valid absent.
+            ("intro\n", Ok(false)),
+            // Test repeated.
+            ("intro\nfoo\nfoo\n", Err(ErrorProblem::ItemRepeated)),
+            // Test repeated with unknown.
+            ("intro\nbar\nfoo\nfoo\n", Err(ErrorProblem::ItemRepeated)),
+            // Test with argument.
+            ("intro\nfoo bar\n", Ok(true)),
+            // Test with two arguments.
+            ("intro\nfoo bar baz\n", Ok(true)),
+            // Test with object.
+            (
+                "intro\nfoo\n-----BEGIN RSA PUBLIC KEY-----\n-----END RSA PUBLIC KEY-----\n",
+                Err(ErrorProblem::ObjectUnexpected),
+            ),
+        ];
+
+        for (input, expect) in tests {
+            println!("{input:?}, {expect:?}");
+
+            // Convert the result by calling .is_present() and extracting EP.
+            let got = parse2::parse_netdoc::<TestDoc>(&ParseInput::new(input, ""))
+                .map(|x| x.foo.is_some())
+                .map_err(|e| e.problem);
+            assert_eq!(got, expect);
+        }
+    }
+
+    #[test]
+    fn item_present_encode() {
+        #[derive(Default)]
+        struct Token;
+
+        #[derive(Deftly)]
+        #[derive_deftly(NetdocEncodable)]
+        struct TestDoc {
+            #[allow(unused)]
+            intro: (),
+            foo: Option<ItemPresent<Token>>,
+        }
+
+        let tests = [
+            (Some(ItemPresent(Token)), "intro\nfoo\n"),
+            (None, "intro\n"),
+        ];
+
+        for (present, output) in tests {
+            let mut encoder = NetdocEncoder::new();
+            TestDoc {
+                intro: (),
+                foo: present,
+            }
+            .encode_unsigned(&mut encoder)
+            .unwrap();
+            assert_eq!(encoder.finish().unwrap(), output);
+        }
     }
 
     /// Helper to call methods for edcerts.
