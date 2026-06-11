@@ -18,7 +18,7 @@ all-features = true
 # @@ test-all-crates conditional-option minimal --features=tokio,native-tls
 
 [features]
-default = ["tokio", "native-tls", "compression"]
+default = ["tokio", "native-tls", "compression", "flowctl-cc"]
 full = [
     "anyhow",
     "keymgr",
@@ -34,6 +34,7 @@ full = [
     "pt-client",
     "rpc",
     "flowctl-cc",
+    "counter-galois-onion",
     "tor-rtcompat/full",
     "tor-proto/full",
     "tor-netdoc/full",
@@ -118,7 +119,7 @@ vanguards = ["tor-guardmgr/vanguards", "tor-circmgr/vanguards"]
 
 flowctl-cc = ["tor-circmgr/flowctl-cc"]
 
-rpc = ["dyn-clone", "tor-rpcbase"]
+rpc = ["dyn-clone", "dep:tor-rpcbase"]
 
 __is_nonadditive = []
 
@@ -143,7 +144,6 @@ experimental = [
     "tor-keymgr/experimental",
     "restricted-discovery",
     "onion-service-cli-extra",
-    "counter-galois-onion",
     "smol",
 ]
 
@@ -157,7 +157,7 @@ ephemeral-keystore = ["tor-keymgr/ephemeral-keystore", "__is_experimental"]
 ctor-keystore = ["tor-keymgr/ctor-keystore", "__is_experimental"]
 error_detail = ["__is_experimental"]
 geoip = ["tor-circmgr/geoip", "tor-dirmgr/geoip", "tor-geoip", "__is_experimental"]
-counter-galois-onion = ["tor-proto/counter-galois-onion", "flowctl-cc", "__is_experimental"]
+counter-galois-onion = ["tor-proto/counter-galois-onion", "flowctl-cc"]
 
 restricted-discovery = [
     "onion-service-service",

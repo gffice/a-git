@@ -220,7 +220,6 @@ pub struct RouterDesc {
     /// * Any number of times.
     pub family_cert: RetainedOrderVec<EmbeddedCert<Ed25519FamilyCert, KeyUnknownCert>>,
 
-    // TODO DIRMIRROR: Abolish this field, assuming torspec!498 lands.
     /// `caches-extra-info` --- Router provides extra-info as a dirmirror.
     ///
     /// * `caches-extra-info`
@@ -600,6 +599,7 @@ impl RouterDesc {
     /// This function does the same as parse(), but returns errors based on
     /// byte-wise positions.  The parse() function converts such errors
     /// into line-and-byte positions.
+    #[allow(clippy::string_slice)] // TODO
     fn parse_internal(r: &mut NetDocReader<'_, RouterKwd>) -> Result<UncheckedRouterDesc> {
         // TODO: This function is too long!  The little "paragraphs" here
         // that parse one item at a time should be made into sub-functions.
@@ -1138,6 +1138,7 @@ mod test {
     #![allow(clippy::unchecked_time_subtraction)]
     #![allow(clippy::useless_vec)]
     #![allow(clippy::needless_pass_by_value)]
+    #![allow(clippy::string_slice)] // See arti#2571
     //! <!-- @@ end test lint list maintained by maint/add_warning @@ -->
     use super::*;
     const TESTDATA: &str = include_str!("../../testdata/routerdesc1.txt");
