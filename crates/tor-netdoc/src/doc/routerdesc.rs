@@ -225,12 +225,17 @@ pub struct RouterDesc {
     /// * `caches-extra-info`
     /// * At most once.
     /// * No extra arguments.
-    pub caches_extra_info: bool,
+    pub caches_extra_info: Option<ItemPresent<CachesExtraInfoToken>>,
 
     /// `extra-info-digest` --- Hash of the extra-info document.
     ///
     /// <https://spec.torproject.org/dir-spec/server-descriptor-format.html#item:extra-info-digest>
     pub extra_info_digest: Option<ExtraInfoDigests>,
+
+    /// `hidden-service-dir` --- Declares this router to be a hidden service directory
+    ///
+    /// <https://spec.torproject.org/dir-spec/server-descriptor-format.html#item:hidden-service-dir>
+    pub hidden_service_dir: Option<ItemPresent<HiddenServiceDirToken>>,
 
     /// `or-address` --- Alternative ORport address and port
     ///
@@ -242,7 +247,7 @@ pub struct RouterDesc {
     /// * `tunnelled-dir-server`
     /// * At most once.
     /// * No extra arguments.
-    pub tunnelled_dir_server: bool,
+    pub tunnelled_dir_server: Option<ItemPresent<TunnelledDirServerToken>>,
 
     /// `proto` --- Subprotocol capabilities supported.
     ///
@@ -286,6 +291,21 @@ pub enum RelayPlatform {
     /// Software not advertised to be Tor.
     Other(String),
 }
+
+/// Zero-sized token type for use in [`RouterDesc::caches_extra_info`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub struct CachesExtraInfoToken;
+
+/// Zero-sized token type for use in [`RouterDesc::hidden_service_dir`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub struct HiddenServiceDirToken;
+
+/// Zero-sized token type for use in [`RouterDesc::tunnelled_dir_server`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub struct TunnelledDirServerToken;
 
 impl std::str::FromStr for RelayPlatform {
     type Err = Error;
@@ -583,6 +603,7 @@ impl RouterDesc {
     /// * [`RouterDesc::overload_general`]
     /// * [`RouterDesc::contact`]
     /// * [`RouterDesc::extra_info_digest`]
+    /// * [`RouterDesc::hidden_service_dir`]
     pub fn parse(s: &str) -> Result<UncheckedRouterDesc> {
         let mut reader = crate::parse::tokenize::NetDocReader::new(s)?;
         let result = Self::parse_internal(&mut reader).map_err(|e| e.within(s))?;
@@ -753,7 +774,7 @@ impl RouterDesc {
         // ntor key
         let ntor_onion_key: Curve25519Public = body.required(NTOR_ONION_KEY)?.parse_arg(0)?;
         // ntor crosscert
-        let crosscert_cert: tor_cert::UncheckedCert = {
+        let (cc_sig, cc_expiry) = {
             let cc = body.required(NTOR_ONION_KEY_CROSSCERT)?;
             let sign: u8 = cc.parse_arg(0)?;
             if sign != 0 && sign != 1 {
@@ -767,12 +788,14 @@ impl RouterDesc {
                             .with_msg("Uncheckable crosscert")
                     })?;
 
-            cc.parse_obj::<UnvalidatedEdCert>("ED25519 CERT")?
-                .check_cert_type(tor_cert::CertType::NTOR_CC_IDENTITY)?
-                .check_subject_key_is(identity_cert.peek_signing_key())?
-                .into_unchecked()
-                .should_be_signed_with(&ntor_as_ed.into())
-                .map_err(|err| EK::BadSignature.err().with_source(err))?
+            let cert = cc
+                .parse_obj::<UnvalidatedEdCert>("ED25519 CERT")?
+                .into_unchecked();
+            let (_, sig, expiry) =
+                Ed25519NtorCrossCert::verify_inner(ntor_as_ed.into(), ed25519_identity_key, cert)
+                    .map_err(|_| EK::BadSignature.err())?;
+
+            (sig, expiry)
         };
 
         // TAP key
@@ -816,10 +839,11 @@ impl RouterDesc {
         };
 
         // tunneled-dir-server
-        let is_dircache = (dirport != 0) || body.get(TUNNELLED_DIR_SERVER).is_some();
+        let is_dircache = ((dirport != 0) || body.get(TUNNELLED_DIR_SERVER).is_some())
+            .then_some(ItemPresent::default());
 
         // caches-extra-info
-        let is_extrainfo_cache = body.get(CACHES_EXTRA_INFO).is_some();
+        let is_extrainfo_cache = body.get(CACHES_EXTRA_INFO).map(|_| ItemPresent::default());
 
         // fingerprint: check for consistency with RSA identity.
         if let Some(fp_tok) = body.get(FINGERPRINT) {
@@ -929,11 +953,6 @@ impl RouterDesc {
                 .with_msg("missing public key")
                 .with_source(err)
         })?;
-        let (crosscert_cert, cc_sig) = crosscert_cert.dangerously_split().map_err(|err| {
-            EK::BadObjectVal
-                .with_msg("missing public key")
-                .with_source(err)
-        })?;
         let mut signatures: Vec<Box<dyn ll::pk::ValidatableSignature>> = vec![
             Box::new(rsa_signature),
             Box::new(ed_signature),
@@ -945,13 +964,12 @@ impl RouterDesc {
         }
 
         let identity_cert = identity_cert.dangerously_assume_timely();
-        let crosscert_cert = crosscert_cert.dangerously_assume_timely();
         let mut expirations = vec![
             published
                 .0
                 .saturating_add(time::Duration::new(ROUTER_EXPIRY_SECONDS, 0)),
             identity_cert.expiry(),
-            crosscert_cert.expiry(),
+            cc_expiry,
         ];
 
         // As outlined above, we have to do this ... :/
@@ -1012,6 +1030,7 @@ impl RouterDesc {
             family_cert: embedded_family_certs.into(),
             caches_extra_info: is_extrainfo_cache,
             extra_info_digest: Default::default(),
+            hidden_service_dir: Default::default(),
             or_address: ipv6addr,
             tunnelled_dir_server: is_dircache,
             proto,

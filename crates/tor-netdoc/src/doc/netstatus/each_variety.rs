@@ -154,14 +154,16 @@ pub struct Preamble {
     pub voting_delay: Option<(u32, u32)>,
 
     /// List of recommended Tor client versions.
-    #[deftly(constructor)]
-    #[deftly(netdoc(single_arg))]
-    pub client_versions: Vec<String>,
+    ///
+    /// <https://spec.torproject.org/dir-spec/consensus-formats.html#item:client-versions>
+    #[deftly(netdoc(default))]
+    pub client_versions: RecommendedTorVersions,
 
     /// List of recommended Tor relay versions.
-    #[deftly(constructor)]
-    #[deftly(netdoc(single_arg))]
-    pub server_versions: Vec<String>,
+    ///
+    /// <https://spec.torproject.org/dir-spec/consensus-formats.html#item:server-versions>
+    #[deftly(netdoc(default))]
+    pub server_versions: RecommendedTorVersions,
 
     /// Router flags which could be determined
     #[deftly(constructor)]
@@ -224,4 +226,15 @@ pub struct Footer {
 pub struct NetworkStatusSignatures {
     /// `directory-signature`s
     pub directory_signature: ns_type!(Vec<Signature>, Vec<Signature>, Signature),
+}
+
+impl Preamble {
+    /// Calculate the validity range (time interval) for this network status document
+    pub fn validity_time_range(&self) -> std::ops::Range<SystemTime> {
+        let lifetime = self.lifetime.clone();
+        let delay = self.voting_delay.unwrap_or((0, 0));
+        let dist_interval = time::Duration::from_secs(delay.1.into());
+        let starting_time = lifetime.valid_after.saturating_sub(dist_interval);
+        starting_time..*lifetime.valid_until
+    }
 }

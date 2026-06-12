@@ -539,9 +539,18 @@ mod ed25519impl {
 
     impl NormalItemArgument for Ed25519AlgorithmString {}
 
-    /// An Ed25519 public key found in a micro descriptor `id` line.
+    /// Ed25519 public key in the form `<keyword> id <base64>`
+    ///
+    ///  * `id` in microdescriptors:
+    ///    <https://spec.torproject.org/dir-spec/computing-microdescriptors.html>
+    ///
+    ///  * `identity-ed25519` in routerdescs:
+    ///    <https://spec.torproject.org/dir-spec/server-descriptor-format.html#item:identity-ed25519>
+    ///
+    ///  * `id` in votes' routerstatus entries:
+    ///    <https://spec.torproject.org/dir-spec/consensus-formats.html#item:id>
     #[derive(Debug, Clone, PartialEq, Eq, Deftly)]
-    #[derive_deftly(ItemValueParseable)]
+    #[derive_deftly(ItemValueEncodable, ItemValueParseable)]
     #[non_exhaustive]
     pub struct Ed25519IdentityLine {
         /// Fixed magic identifier (`ed25519`) for this line.
@@ -1498,10 +1507,12 @@ mod edcert {
         types::EmbeddableCertObject,
     };
     use saturating_time::SaturatingTime;
-    use tor_cert::{CertType, Ed25519Cert, KeyUnknownCert};
+    use tor_cert::{CertType, CertifiedKey, Ed25519Cert, KeyUnknownCert};
+    use tor_checkable::signed::SignatureGated;
+    use tor_checkable::timed::TimerangeBound;
     use tor_checkable::{SelfSigned, Timebound};
     use tor_error::{Bug, into_internal};
-    use tor_llcrypto::pk::ed25519::{self, Ed25519PublicKey};
+    use tor_llcrypto::pk::ed25519::{self, Ed25519PublicKey, ValidatableEd25519Signature};
 
     /// An ed25519 certificate as parsed from a directory object, with
     /// signature not validated.
@@ -1765,6 +1776,197 @@ mod edcert {
                 },
                 cert,
             ))
+        }
+    }
+
+    /// Verified reverse cert by K_ntor on KP_relayid_ed
+    ///
+    /// This certificate is signed by KS_ntor
+    /// (the circuit extension key) and certifies
+    /// KP_relayid_ed25519 ed25519 identity key of the relay.
+    ///
+    /// The type itself is zero-sized because it provides no new useful
+    /// information that cannot be found elsewhere within the router descriptor.
+    /// It is intended for use within
+    /// [`EmbeddedCert`]`<Ed25519NtorCrossCert, KeyUnknownCert>`
+    ///
+    /// # Note on key conversion
+    ///
+    /// Keep in mind however that the ntor onion key is only provided as an
+    /// X25519 key and *not* an Ed25519 key, meaning that interfacing
+    /// applications have to convert it using a function such as
+    /// [`tor_llcrypto::pk::keymanip::convert_curve25519_to_ed25519_public()`].
+    /// This also requires obtaining the sign bit which is usually given as an
+    /// argument in the `ntor-onion-key-crosscert` item.  However, this is
+    /// outside of the scope of this struct and the code will assume that
+    /// callers have already converted the X25519 public key to an Ed25519
+    /// public key as outlined in the specifications.
+    ///
+    /// # See Also
+    ///
+    /// * <https://spec.torproject.org/dir-spec/server-descriptor-format.html#item:ntor-onion-key-crosscert>
+    /// * <https://spec.torproject.org/dir-spec/converting-to-ed25519.html>
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub struct Ed25519NtorCrossCert {
+        /// Explicit field, to avoid constructing this accidentally without
+        /// doing all the verification.
+        _promise_we_verified: (),
+    }
+
+    impl EmbeddableCertObject<KeyUnknownCert> for Ed25519NtorCrossCert {
+        const LABEL: &str = "ED25519 CERT";
+    }
+
+    impl Ed25519NtorCrossCert {
+        /// Verifies the validity of an [`Ed25519NtorCrossCert`].
+        ///
+        /// For such a certificate to be valid, the caller must provide a known
+        /// Ed25519 identity key and Ed25519 ntor onion key of the relay
+        /// beforehand.
+        ///
+        /// # Requirements
+        ///
+        /// 1. MUST be of [`CertType::NTOR_CC_IDENTITY`].
+        /// 2. Certified key MUST be of [`CertifiedKey::Ed25519`].
+        /// 3. Certified key MUST be equal to `id_ed25519`.
+        /// 4. MUST have a valid signature.
+        /// 5. MUST be valid at `now`.
+        pub fn verify(
+            ntor_ed25519: ed25519::Ed25519Identity,
+            id_ed25519: ed25519::Ed25519Identity,
+            cert: KeyUnknownCert,
+            post_tolerance: Duration,
+            now: SystemTime,
+        ) -> StdResult<Self, VerifyFailed> {
+            Ok(
+                // .verify_inner() ensures 1-3.
+                Self::verify_inner(ntor_ed25519, id_ed25519, cert)?
+                    .0
+                    // 4. MUST have a valid signature.
+                    .check_signature()?
+                    .extend_tolerance(post_tolerance)
+                    // 5. MUST be valid at `now`.
+                    .check_valid_at(&now)?,
+            )
+        }
+
+        /// Creates a new signed [`Ed25519NtorCrossCert`].
+        pub fn new_signed(
+            ntor_ed25519: &ed25519::Keypair,
+            id_ed25519: ed25519::Ed25519Identity,
+            expiry: SystemTime,
+        ) -> StdResult<EmbeddedCert<Self, KeyUnknownCert>, Bug> {
+            let cert = Ed25519Cert::builder()
+                .expiration(expiry)
+                .cert_type(CertType::NTOR_CC_IDENTITY)
+                .cert_key(id_ed25519.into())
+                .encode_and_sign(ntor_ed25519)
+                .map_err(into_internal!("failed to encode and sign ntor cert"))?;
+
+            let cert =
+                Ed25519Cert::decode(&cert).map_err(into_internal!("decode just encoded cert"))?;
+
+            Ok(EmbeddedCert::new(
+                Self {
+                    _promise_we_verified: (),
+                },
+                cert,
+            ))
+        }
+
+        /// Verifies the validity of a [`KeyUnknownCert`] believed to be a
+        /// [`CertType::NTOR_CC_IDENTITY`].
+        ///
+        /// This function serves as glue between the legacy parser and
+        /// [`Self::verify()`].
+        ///
+        /// # Requirements
+        ///
+        /// 1. MUST be of [`CertType::NTOR_CC_IDENTITY`].
+        /// 2. Certified key MUST be of [`CertifiedKey::Ed25519`].
+        /// 3. Certified key MUST be equal to `id_ed25519`.
+        ///
+        /// # Return Type
+        ///
+        /// Actual signature and time validation is done by the caller, hence
+        /// why it returns a gated type as the first element of the tuple.
+        /// The other elements constitute the inner signature plus the
+        /// SystemTime denoting the expiry.  This is required for integration
+        /// with legacy parser in order to enable pushing it to the verification
+        /// batch, as the [`tor_checkable`] primitives do not provide access
+        /// to the inner signatures/expiries and also do not support operations
+        /// like cloning due to being dyn.
+        pub(crate) fn verify_inner(
+            ntor_ed25519: ed25519::Ed25519Identity,
+            id_ed25519: ed25519::Ed25519Identity,
+            cert: KeyUnknownCert,
+        ) -> StdResult<
+            (
+                SignatureGated<TimerangeBound<Self>>,
+                ValidatableEd25519Signature,
+                SystemTime,
+            ),
+            VerifyFailed,
+        > {
+            // 1. MUST be of [`CertType::NTOR_CC_IDENTITY`].
+            if cert.peek_cert_type() != CertType::NTOR_CC_IDENTITY {
+                return Err(ErrorProblem::ObjectInvalidData.into());
+            }
+
+            // 2. Certified key MUST be of [`CertifiedKey::Ed25519`].
+            // 3. Certified key MUST be equal to `id_ed25519`.
+            if cert.peek_subject_key() != &CertifiedKey::Ed25519(id_ed25519) {
+                return Err(VerifyFailed::VerifyFailed);
+            }
+
+            // Fish out the signature from the certificate and verify it later.
+            //
+            // It may fail if ntor_ed25519 is not a valid mapping to a public
+            // key.  This is okay.  The .should_be_signed_with() call is
+            // tor_cert boilerplate and only required to obtain an
+            // UncheckedCert, as ntor cross-certificates do not contain the
+            // signed-with extension.
+            let (cert, sig) = cert
+                .should_be_signed_with(&ntor_ed25519)?
+                .dangerously_split()?;
+
+            // Fish out the expiration date from the certificate.
+            //
+            // TimerangeBound also requires a lower-bound, for which we will use
+            // SystemTime::UNIX_EPOCH, because this is the minimum possible
+            // value allowed in the expiration date of Tor certificates.
+            // Besides, Tor certificates do not contain a valid-after anyways,
+            // meaning we cannot really put something more meaningful here.
+            // It differs from the legacy parser in that regard, because that
+            // parser uses the `published` field found in router descriptors
+            // minus a tolerance.  However, we cannot make use of this field
+            // here because we do not have access to the full router descriptor
+            // in this function.  This should be okay though.
+            let cert = cert.dangerously_assume_timely();
+            let expiration = SystemTime::UNIX_EPOCH..cert.expiry();
+
+            Ok((
+                SignatureGated::new(
+                    TimerangeBound::new(
+                        Self {
+                            _promise_we_verified: (),
+                        },
+                        expiration.clone(),
+                    ),
+                    vec![Box::new(sig.clone())],
+                ),
+                sig,
+                expiration.end,
+            ))
+        }
+
+        /// Test only function for creating an unverified instance.
+        #[cfg(test)]
+        pub(crate) fn dangerous_new_unverified() -> Self {
+            Self {
+                _promise_we_verified: (),
+            }
         }
     }
 }
@@ -2339,8 +2541,11 @@ mod boolean {
 
 /// Types for router descriptors.
 pub mod routerdesc {
+    use crate::types::EmbeddedCert;
+
     use super::*;
     use parse2::ErrorProblem as EP;
+    use tor_cert::KeyUnknownCert;
     use tor_llcrypto::pk::ed25519;
 
     /// Version argument found in an `overload-general` item.
@@ -2583,6 +2788,33 @@ pub mod routerdesc {
         /// The estimate of the capacity this relay can handle.
         pub observed: u64,
     }
+
+    /// Ntor onion key cross-certificate.
+    ///
+    /// This struct contains an [`Ed25519NtorCrossCert`] alongside the `bit`
+    /// field required for converting the ntor X25519 key to an Ed25519 key.
+    ///
+    /// # See Also
+    ///
+    /// * [`Ed25519NtorCrossCert`]
+    /// * <https://spec.torproject.org/dir-spec/server-descriptor-format.html#item:ntor-onion-key-crosscert>
+    #[derive(Debug, Clone, Deftly)]
+    #[derive_deftly(ItemValueParseable, ItemValueEncodable)]
+    #[deftly(netdoc(no_extra_args))]
+    #[non_exhaustive]
+    pub struct NtorOnionKeyCrossCert {
+        /// True if X coordinate of the ntor onion key is negative, false if
+        /// positive.
+        // TODO spec: This name is very unfortunate, how about we change it
+        // to `is_negative`.  Also, using a boolean for storing a sign bit feels
+        // wrong to me due to the zero edge case, which would not be negative,
+        // but also not positive either.
+        pub bit: NumericBoolean,
+
+        /// The actual embedded ntor onion key certificate.
+        #[deftly(netdoc(object))]
+        pub cert: EmbeddedCert<Ed25519NtorCrossCert, KeyUnknownCert>,
+    }
 }
 
 #[cfg(test)]
@@ -2618,7 +2850,10 @@ mod test {
         Pos, Result,
         encode::NetdocEncodable,
         parse2::{ErrorProblem, ParseInput, VerifyFailed},
-        types::EmbeddedCert,
+        types::{
+            EmbeddedCert,
+            routerdesc::{NtorOnionKeyCrossCert, RouterDescIntroItem},
+        },
     };
 
     /// Decode s as a multi-line base64 string, ignoring ascii whitespace.
@@ -3304,6 +3539,73 @@ mod test {
         }
     }
 
+    #[test]
+    fn ntor_onion_key_cross_cert() {
+        // Dummy helper for parsing a subset of a router desc.
+        #[derive(Debug, Deftly)]
+        #[derive_deftly(NetdocParseable)]
+        #[allow(unused)]
+        struct TestDoc {
+            /// Intro item.
+            router: RouterDescIntroItem,
+
+            /// Timestamp used for `now` in certificate validation.
+            #[deftly(netdoc(single_arg))]
+            published: Iso8601TimeSp,
+
+            /// Required to ensure certified key of the crosscert.
+            #[deftly(netdoc(single_arg))]
+            master_key_ed25519: Ed25519Public,
+
+            /// Required to obtain the key signing the crosscert.
+            #[deftly(netdoc(single_arg))]
+            ntor_onion_key: Curve25519Public,
+
+            /// The actual crosscert.
+            ntor_onion_key_crosscert: NtorOnionKeyCrossCert,
+        }
+
+        impl TestDoc {
+            // Quick verify helper.
+            fn verify(&self, now: SystemTime) {
+                Ed25519NtorCrossCert::verify(
+                    // Converts X25519 to Ed25519.
+                    tor_llcrypto::pk::keymanip::convert_curve25519_to_ed25519_public(
+                        &self.ntor_onion_key.0,
+                        self.ntor_onion_key_crosscert.bit.0.into(),
+                    )
+                    .unwrap()
+                    .into(),
+                    self.master_key_ed25519.0,
+                    self.ntor_onion_key_crosscert.cert.raw_unverified().clone(),
+                    Duration::ZERO,
+                    now,
+                )
+                .unwrap();
+            }
+        }
+
+        let descs = include_str!("../../testdata2/cached-descriptors.new");
+        let descs = parse2::parse_netdoc_multiple::<TestDoc>(&ParseInput::new(
+            descs,
+            "cached-descriptors.new",
+        ))
+        .unwrap();
+
+        // Find the first with negative and first with positive X coordinate.
+        let negative_rd = descs
+            .iter()
+            .find(|rd| rd.ntor_onion_key_crosscert.bit.0)
+            .unwrap();
+        let positive_rd = descs
+            .iter()
+            .find(|rd| !rd.ntor_onion_key_crosscert.bit.0)
+            .unwrap();
+
+        negative_rd.verify(negative_rd.published.0);
+        positive_rd.verify(positive_rd.published.0);
+    }
+
     /// Helper to call methods for edcerts.
     trait Ed25519CertTest: Sized + PartialEq + Eq + Debug {
         /// Creates a new instance.
@@ -3332,6 +3634,7 @@ mod test {
         /// The method verifies a certificate given a pre-known certified key,
         /// the actual certificate, and a timestamp.
         fn verify(
+            signing_key: Option<ed25519::Ed25519Identity>,
             certified_key: ed25519::Ed25519Identity,
             cert: KeyUnknownCert,
             post_tolerance: Duration,
@@ -3363,6 +3666,7 @@ mod test {
         }
 
         fn verify(
+            _signing_key: Option<ed25519::Ed25519Identity>,
             _certified_key: ed25519::Ed25519Identity,
             cert: KeyUnknownCert,
             post_tolerance: Duration,
@@ -3395,12 +3699,50 @@ mod test {
         }
 
         fn verify(
+            _signing_key: Option<ed25519::Ed25519Identity>,
             certified_key: ed25519::Ed25519Identity,
             cert: KeyUnknownCert,
             post_tolerance: Duration,
             now: SystemTime,
         ) -> StdResult<Self, VerifyFailed> {
             Self::verify(certified_key, cert, post_tolerance, now)
+        }
+    }
+
+    impl Ed25519CertTest for Ed25519NtorCrossCert {
+        fn new(
+            _signing_key: ed25519::Ed25519Identity,
+            _certified_key: ed25519::Ed25519Identity,
+        ) -> Self {
+            Self::dangerous_new_unverified()
+        }
+
+        fn cert_type() -> CertType {
+            CertType::NTOR_CC_IDENTITY
+        }
+
+        fn new_signed(
+            signing_key: &ed25519::Keypair,
+            certified_key: ed25519::Ed25519Identity,
+            expiry: SystemTime,
+        ) -> StdResult<EmbeddedCert<Self, KeyUnknownCert>, Bug> {
+            Self::new_signed(signing_key, certified_key, expiry)
+        }
+
+        fn verify(
+            signing_key: Option<ed25519::Ed25519Identity>,
+            certified_key: ed25519::Ed25519Identity,
+            cert: KeyUnknownCert,
+            post_tolerance: Duration,
+            now: SystemTime,
+        ) -> StdResult<Self, VerifyFailed> {
+            Self::verify(
+                signing_key.unwrap(),
+                certified_key,
+                cert,
+                post_tolerance,
+                now,
+            )
         }
     }
 
@@ -3441,6 +3783,7 @@ mod test {
 
         // Finally, see if .verify() agrees.
         T::verify(
+            Some(signing_key.public_key().into()),
             certified_key.public_key().into(),
             unverified.clone(),
             Duration::ZERO,
@@ -3450,6 +3793,7 @@ mod test {
 
         // See if .verify() also agrees when expired but with toleration.
         T::verify(
+            Some(signing_key.public_key().into()),
             certified_key.public_key().into(),
             unverified,
             Duration::from_secs(60 * 60),
@@ -3459,7 +3803,7 @@ mod test {
     }
 
     /// Tests invalid Ed25519 certificates by violating various constraints.
-    fn ed25519_cert_invalid<T: Ed25519CertTest>() {
+    fn ed25519_cert_invalid<T: Ed25519CertTest + 'static>(requires_signed_with_ext: bool) {
         let mut rng = testing_rng();
         let now = str_to_st("2000-01-01 06:00:00");
         let expiry = str_to_st("2000-01-01 12:00:00");
@@ -3468,24 +3812,15 @@ mod test {
         let certified_key = ed25519::Keypair::generate(&mut rng);
         let certified_pk = ed25519::Ed25519Identity::from(certified_key.public_key());
 
-        let tests: [(_, _, CertifiedKey, _, _); _] = [
-            // Violate absence of `signed-with-ed25519-key`.
-            (
-                T::cert_type(),
-                expiry,
-                certified_pk.into(),
-                None,
-                &signing_key,
-            ),
-            // ---
+        let mut tests: Vec<(_, _, CertifiedKey, _, _)> = vec![
             // Testing a violation of the signature is hard because the encoder
             // refuses to emit such a thing.
             // ---
             // Violate timestamp.
             (
                 T::cert_type(),
-                // We achieve this by setting expiry to now.
-                now,
+                // We achieve this by setting expiry to now - 1 day.
+                now - Duration::from_secs(64 * 64 * 24),
                 certified_pk.into(),
                 Some(&signing_pk),
                 &signing_key,
@@ -3493,7 +3828,7 @@ mod test {
             // Violate cert type.
             (
                 // Just picking something completely out of place here.
-                CertType::NTOR_CC_IDENTITY,
+                CertType::LINK_AUTH_X509,
                 expiry,
                 certified_pk.into(),
                 Some(&signing_pk),
@@ -3508,20 +3843,23 @@ mod test {
                 Some(&signing_pk),
                 &signing_key,
             ),
-            // Violate both keys must be different.
-            (
-                T::cert_type(),
-                expiry,
-                // Just pass the signing key twice.
-                signing_pk.into(),
-                Some(&signing_pk),
-                &signing_key,
-            ),
             // ---
             // Missing test for violating both keys MUST be valid mappings to a
             // [`ed25519::PublicKey`].  I was unable to find a single test
             // vector for this, even in curve25591-dalek. :/
         ];
+
+        // Violate absence of `signed-with-ed25519-key`.
+        // This is not a violation in Ed25519NtorCrossCert.
+        if requires_signed_with_ext {
+            tests.push((
+                T::cert_type(),
+                expiry,
+                certified_pk.into(),
+                None,
+                &signing_key,
+            ));
+        }
 
         for (ctype, expiry, certified_key, signing_key, signing_kp) in tests {
             let mut builder = Ed25519Cert::builder()
@@ -3538,6 +3876,7 @@ mod test {
             // in order to make it possible to test for invalid certified
             // key types.
             T::verify(
+                signing_key.copied(),
                 Ed25519Identity::from_bytes(certified_key.as_bytes()).unwrap(),
                 cert,
                 Duration::ZERO,
@@ -3547,6 +3886,8 @@ mod test {
         }
     }
 
+    // TODO: Merge all those generic functions.
+
     #[test]
     fn ed25519_identity_cert_rng() {
         ed25519_cert_rng::<Ed25519IdentityCert>();
@@ -3554,7 +3895,7 @@ mod test {
 
     #[test]
     fn ed25519_identity_cert_invalid() {
-        ed25519_cert_invalid::<Ed25519IdentityCert>();
+        ed25519_cert_invalid::<Ed25519IdentityCert>(true);
     }
 
     #[test]
@@ -3564,6 +3905,16 @@ mod test {
 
     #[test]
     fn ed25519_family_cert_invalid() {
-        ed25519_cert_invalid::<Ed25519FamilyCert>();
+        ed25519_cert_invalid::<Ed25519FamilyCert>(true);
+    }
+
+    #[test]
+    fn ed25519_ntor_crosscert_rng() {
+        ed25519_cert_rng::<Ed25519NtorCrossCert>();
+    }
+
+    #[test]
+    fn ed25519_ntor_crosscert_invalid() {
+        ed25519_cert_invalid::<Ed25519NtorCrossCert>(false);
     }
 }

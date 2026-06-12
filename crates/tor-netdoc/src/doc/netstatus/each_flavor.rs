@@ -298,11 +298,8 @@ impl Consensus {
             siggroup,
             n_authorities: None,
         };
-        let lifetime = unval.consensus.preamble.lifetime.clone();
-        let delay = unval.consensus.preamble.voting_delay.unwrap_or((0, 0));
-        let dist_interval = time::Duration::from_secs(delay.1.into());
-        let starting_time = *lifetime.valid_after - dist_interval;
-        let timebound = TimerangeBound::new(unval, starting_time..*lifetime.valid_until);
+        let timebound_range = unval.consensus.preamble.validity_time_range();
+        let timebound = TimerangeBound::new(unval, timebound_range);
         Ok((signed_str, remainder, timebound))
     }
 }
@@ -349,20 +346,26 @@ impl Preamble {
             .into();
         let lifetime = Lifetime::new(valid_after, fresh_until, valid_until)?;
 
-        let client_versions = sec
-            .maybe(CLIENT_VERSIONS)
-            .args_as_str()
-            .unwrap_or("")
-            .split(',')
-            .map(str::to_string)
-            .collect();
-        let server_versions = sec
-            .maybe(SERVER_VERSIONS)
-            .args_as_str()
-            .unwrap_or("")
-            .split(',')
-            .map(str::to_string)
-            .collect();
+        let parse_rec_versions = |item| {
+            let item = sec
+                .maybe(item);
+            let args = item
+                .args_as_str()
+                .unwrap_or("")
+                // C Tor emits an item with trailing whitespace which we must ignore
+                .trim();
+            // We want only the first arg, according to the spec.
+            // We could want to use MaybeItem::parse_arg, but it treats absence of the
+            // argument as an error.  There is no parse_optional_arg on `MaybeItem`.
+            // We could add that, but I am trying to avoid adding code to the old parser.
+            // So instead we reimplement argument splitting (again).
+            args
+                .split_once(|c: char| c.is_ascii_whitespace()).map(|(l, _r)| l).unwrap_or(args)
+                .parse()
+                .map_err(|_e| EK::BadArgument.at_pos(item.pos()))
+        };
+        let client_versions = parse_rec_versions(CLIENT_VERSIONS)?;
+        let server_versions = parse_rec_versions(SERVER_VERSIONS)?;
 
         let proto_statuses = {
             let client = ProtoStatus::from_section(
@@ -534,11 +537,8 @@ impl ExternallySigned<Consensus> for UnvalidatedConsensus {
                 "Didn't set authorities on consensus"
             ))),
             Some(authority) => {
-                if self.siggroup.validate(authority, k) {
-                    Ok(())
-                } else {
-                    Err(EK::BadSignature.err())
-                }
+                self.siggroup.validate(authority, k)
+                    .map_err(|_: VerifyFailed| EK::BadSignature.err())
             }
         }
     }

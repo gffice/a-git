@@ -1,3 +1,11 @@
+ADDED: `NtorOnionKeyCrossCert` type
+ADDED: `HiddenServiceDirToken`
+ADDED: `RouterDesc::hidden_service_dir`
+ADDED: `CachesExtraInfoToken`
+ADDED: `TunnelledDirServerToken`
+BREAKING: `RouterDesc::caches_extra_info` stored as `CachesExtraInfoToken`
+BREAKING: `RouterDesc::tunnelled_dir_server` stored as `TunnelledDirServerToken`
+ADDED: `Ed25519NtorCrossCert` type
 ADDED: `ItemPresent` type
 ADDED: `RouterDesc::extra_info_digest` field
 ADDED: `RouterDesc::contact` field
@@ -13,3 +21,5 @@ ADDED: `F64Finite` type
 ADDED: `doc::netstatus::{plain, md, vote}::NetworkStatus`
 BREAKING: `AuthCertUnverified::verify` doesn't take times; instead returns `TimerangeBound`
 DEPRECATED: `parse2::check_validity_time` and `check_validity_time_tolerance`
+ADDED: `RouterStatus` fields `r.dir_port`, `p`, `id`
+ADDED: `impl From<std::convert::Infallible> for Error`
