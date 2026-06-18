@@ -1,6 +1,11 @@
+ADDED: `encode::ItemArgument` for `SpFingerprint`
+ADDED: `ItemValueEncodable` for `ExtraInfoDigests`
+ADDED: `ItemValueEncodable` for `RouterDescIntroItem`
+ADDED: `ItemValueEncodable` for `OverloadGeneral`
 ADDED: `ItemValueEncodable` for `RelayPlatform`
 BREAKING: Replaced `ItemArgumentParseable` with `ItemValueParseable` for `RelayPlatform`
 ADDED: `NtorOnionKeyCrossCert` type
+ADDED: `RouterDesc::ntor_onion_key_crosscert`
 ADDED: `HiddenServiceDirToken`
 ADDED: `RouterDesc::hidden_service_dir`
 ADDED: `CachesExtraInfoToken`
@@ -25,3 +30,6 @@ BREAKING: `AuthCertUnverified::verify` doesn't take times; instead returns `Time
 DEPRECATED: `parse2::check_validity_time` and `check_validity_time_tolerance`
 ADDED: `impl From<std::convert::Infallible> for Error`
 ADDED: `RouterStatus` fields `r.dir_port`, `p`, `id`, `stats`
+ADDED: `plain::NetworkStatus` and `md::NetworkStatus` implement `NetdocEncodable`
+ADDED: `plain::NetworkStatus` and `md::NetworkStatus` have `verify` methods
+ADDED: `EmbeddedCert` implements `NetdocEncodable` and `NetdocParseable`
