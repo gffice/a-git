@@ -1,3 +1,5 @@
+BREAKING: Ed25519 certificate verify methods now wrap around `TimerangeBound`
+ADDED: `NetdocParseableUnverified` for `RouterDesc`
 ADDED: `NetdocEncodableFields` for `AddrPolicy`
 ADDED: `encode::ItemArgument` for `SpFingerprint`
 ADDED: `ItemValueEncodable` for `ExtraInfoDigests`
