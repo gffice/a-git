@@ -49,9 +49,9 @@ use derive_deftly::Deftly;
 use ll::pk::ed25519::Ed25519Identity;
 use saturating_time::SaturatingTime;
 use std::fmt::Display;
-use std::sync::Arc;
 use std::sync::LazyLock;
 use std::{iter, net, time};
+use tor_basic_utils::intern::Intern;
 use tor_cert::{CertType, KeyUnknownCert};
 use tor_checkable::{Timebound, signed, timed};
 use tor_error::{internal, into_internal};
@@ -208,7 +208,7 @@ pub struct RouterDesc {
     /// * `ipv6-policy <accept/reject> PortList`
     /// * At most once.
     #[deftly(netdoc(default))]
-    pub ipv6_policy: Arc<PortPolicy>,
+    pub ipv6_policy: Intern<PortPolicy>,
 
     /// `overload-general` --- Relay is overloaded.
     ///
@@ -228,7 +228,7 @@ pub struct RouterDesc {
     /// * One or more `LongIdent` arguments.
     /// * At most once.
     #[deftly(netdoc(default))]
-    pub family: Arc<RelayFamily>,
+    pub family: Intern<RelayFamily>,
 
     /// `family-cert` --- Prove membership in a relay family.
     ///
@@ -579,8 +579,8 @@ impl RouterDesc {
     }
 
     /// Return the declared family of this descriptor.
-    pub fn family(&self) -> Arc<RelayFamily> {
-        Arc::clone(&self.family)
+    pub fn family(&self) -> Intern<RelayFamily> {
+        Intern::clone(&self.family)
     }
 
     /// Return the authenticated family IDs of this descriptor.
@@ -654,7 +654,6 @@ impl RouterDesc {
     /// This function does the same as parse(), but returns errors based on
     /// byte-wise positions.  The parse() function converts such errors
     /// into line-and-byte positions.
-    #[allow(clippy::string_slice)] // TODO
     fn parse_internal(r: &mut NetDocReader<'_, RouterKwd>) -> Result<UncheckedRouterDesc> {
         // TODO: This function is too long!  The little "paragraphs" here
         // that parse one item at a time should be made into sub-functions.
@@ -758,7 +757,10 @@ impl RouterDesc {
             let mut d = ll::d::Sha256::new();
             d.update(&b"Tor router descriptor signature v1"[..]);
             let signed_end = ed_sig_pos + b"router-sig-ed25519 ".len();
-            d.update(&s[start_offset..signed_end]);
+            d.update(
+                s.get(start_offset..signed_end)
+                    .ok_or(internal!("chopped utf8"))?,
+            );
             let d = d.finalize();
             let sig: [u8; 64] = ed_sig
                 .parse_arg::<B64>(0)?
@@ -772,7 +774,10 @@ impl RouterDesc {
         let rsa_signature: ll::pk::rsa::ValidatableRsaSignature = {
             let mut d = ll::d::Sha1::new();
             let signed_end = rsa_sig_pos + b"router-signature\n".len();
-            d.update(&s[start_offset..signed_end]);
+            d.update(
+                s.get(start_offset..signed_end)
+                    .ok_or(internal!("chopped utf8"))?,
+            );
             let d = d.finalize();
             let sig = rsa_sig.obj("SIGNATURE")?;
             // TODO: we need to accept prefixes here. COMPAT BLOCKER.
