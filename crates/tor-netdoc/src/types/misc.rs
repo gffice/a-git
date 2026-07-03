@@ -2726,9 +2726,13 @@ pub mod routerdesc {
 
     /// SHA-1 router descriptor signature over `router-sig-ed25519`.
     // TODO DIRMIRROR Is this not the same as RsaSha1Signature ?
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, Deftly)]
+    #[derive_deftly(ItemValueEncodable)]
     #[allow(clippy::exhaustive_structs)]
-    pub struct RouterSignature(pub Vec<u8>);
+    pub struct RouterSignature(
+        #[deftly(netdoc(object(label = "SIGNATURE"), with = crate::types::raw_data_object))]
+        pub  Vec<u8>,
+    );
 
     impl SignatureItemParseable for RouterSignature {
         type HashAccu = RouterHashAccu;
@@ -2785,7 +2789,7 @@ pub mod routerdesc {
     ///
     /// * [`Ed25519NtorCrossCert`]
     /// * <https://spec.torproject.org/dir-spec/server-descriptor-format.html#item:ntor-onion-key-crosscert>
-    #[derive(Debug, Clone, Deftly, PartialEq, Eq)]
+    #[derive(Debug, Clone, Deftly, PartialEq)]
     #[derive_deftly(ItemValueParseable, ItemValueEncodable)]
     #[deftly(netdoc(no_extra_args))]
     #[non_exhaustive]

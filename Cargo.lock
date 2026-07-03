@@ -7456,6 +7456,7 @@ name = "tor-hsclient"
 version = "0.44.0"
 dependencies = [
  "async-trait",
+ "cfg-if",
  "derive-deftly",
  "derive_more",
  "educe",
@@ -7901,6 +7902,7 @@ dependencies = [
  "pem",
  "phf",
  "rand 0.10.1",
+ "rangemap",
  "regex",
  "saturating-time",
  "serde",
