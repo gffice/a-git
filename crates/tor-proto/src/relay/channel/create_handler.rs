@@ -6,10 +6,9 @@ use crate::ccparams::{
     VegasParams,
 };
 use crate::channel::Channel;
-use crate::circuit::CircuitRxSender;
-use crate::circuit::UniqId;
 use crate::circuit::celltypes::{CreateRequest, CreateResponse};
-use crate::circuit::circhop::{HandshakeParamsError, HandshakeSubprotocols, HopSettings};
+use crate::circuit::circhop::{HandshakeParamsError, HopSettings};
+use crate::circuit::{CircuitRxSender, HandshakeSubprotocols, UniqId};
 use crate::client::circuit::padding::PaddingController;
 use crate::crypto::binding::CircuitBinding;
 use crate::crypto::cell::CryptInit as _;
@@ -616,4 +615,157 @@ where
     fn current_filter(&self) -> Box<dyn IncomingStreamRequestFilter> {
         (self)()
     }
+}
+
+#[cfg(test)]
+mod test {
+    // @@ begin test lint list maintained by maint/add_warning @@
+    #![allow(clippy::bool_assert_comparison)]
+    #![allow(clippy::clone_on_copy)]
+    #![allow(clippy::dbg_macro)]
+    #![allow(clippy::mixed_attributes_style)]
+    #![allow(clippy::print_stderr)]
+    #![allow(clippy::print_stdout)]
+    #![allow(clippy::single_char_pattern)]
+    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unchecked_time_subtraction)]
+    #![allow(clippy::useless_vec)]
+    #![allow(clippy::needless_pass_by_value)]
+    #![allow(clippy::string_slice)] // See arti#2571
+    //! <!-- @@ end test lint list maintained by maint/add_warning @@ -->
+
+    use tor_cell::chancell::{ChanCmd, ChanMsg as _};
+    use tor_rtcompat::test_with_one_runtime;
+
+    use crate::channel::test_utils;
+    use crate::circuit::CircParameters;
+
+    #[test]
+    fn create_fast() {
+        test_with_one_runtime!(|rt| async move {
+            let mut conn_inspector = test_utils::ConnInspector::new();
+
+            let (client_chan, _relay_chan, _circuit_stream_rx, _target_builder) =
+                test_utils::new_channel_pair_with_keys(&rt, &conn_inspector);
+
+            let pending_tunnel = test_utils::new_pending_tunnel(&rt, &client_chan).await;
+
+            let circ_params = CircParameters::default();
+
+            let tunnel = pending_tunnel
+                .create_firsthop_fast(circ_params)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                conn_inspector.try_client_cell().unwrap().msg().cmd(),
+                ChanCmd::CREATE_FAST,
+            );
+            assert_eq!(
+                conn_inspector.try_relay_cell().unwrap().msg().cmd(),
+                ChanCmd::CREATED_FAST,
+            );
+
+            drop(tunnel);
+
+            assert_eq!(
+                conn_inspector.client_cell().await.unwrap().msg().cmd(),
+                ChanCmd::DESTROY,
+            );
+            // TODO(relay): I think the relay shouldn't be sending a DESTROY back to the client.
+            // https://gitlab.torproject.org/tpo/core/arti/-/work_items/2648
+            assert_eq!(
+                conn_inspector.relay_cell().await.unwrap().msg().cmd(),
+                ChanCmd::DESTROY,
+            );
+        });
+    }
+
+    #[test]
+    fn tap() {
+        test_with_one_runtime!(|rt| async move {
+            let mut conn_inspector = test_utils::ConnInspector::new();
+
+            let (client_chan, _relay_chan, _circuit_stream_rx, mut target_builder) =
+                test_utils::new_channel_pair_with_keys(&rt, &conn_inspector);
+
+            let pending_tunnel = test_utils::new_pending_tunnel(&rt, &client_chan).await;
+
+            let circ_params = CircParameters::default();
+
+            // https://spec.torproject.org/tor-spec/subprotocol-versioning.html
+            // 1 = RELAY_BASE
+            let protocols = "Relay=1".parse().unwrap();
+            let target = target_builder.protocols(protocols).build().unwrap();
+
+            // TODO: This should fail since we don't support TAP handshakes.
+            // But the channel will do an ntor handshake anyway even though it's not supported.
+            // https://gitlab.torproject.org/tpo/core/arti/-/work_items/2489
+            let _tunnel = pending_tunnel
+                .create_firsthop(&target, circ_params)
+                .await
+                .unwrap();
+
+            // TODO: As above, this is wrong.
+            assert_eq!(
+                conn_inspector.try_client_cell().unwrap().msg().cmd(),
+                ChanCmd::CREATE2,
+            );
+            assert_eq!(
+                conn_inspector.try_relay_cell().unwrap().msg().cmd(),
+                ChanCmd::CREATED2,
+            );
+        });
+    }
+
+    #[test]
+    fn ntor() {
+        test_with_one_runtime!(|rt| async move {
+            let mut conn_inspector = test_utils::ConnInspector::new();
+
+            let (client_chan, _relay_chan, _circuit_stream_rx, mut target_builder) =
+                test_utils::new_channel_pair_with_keys(&rt, &conn_inspector);
+
+            // https://spec.torproject.org/tor-spec/subprotocol-versioning.html
+            // 2 = RELAY_NTOR
+            // 3 = RELAY_EXTEND_IPv6
+            for relay_version in [2, 3] {
+                let pending_tunnel = test_utils::new_pending_tunnel(&rt, &client_chan).await;
+
+                let circ_params = CircParameters::default();
+
+                let protocols = format!("Relay=2-{relay_version}").parse().unwrap();
+                let target = target_builder.protocols(protocols).build().unwrap();
+
+                let tunnel = pending_tunnel
+                    .create_firsthop(&target, circ_params)
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    conn_inspector.try_client_cell().unwrap().msg().cmd(),
+                    ChanCmd::CREATE2,
+                );
+                assert_eq!(
+                    conn_inspector.try_relay_cell().unwrap().msg().cmd(),
+                    ChanCmd::CREATED2,
+                );
+
+                drop(tunnel);
+
+                assert_eq!(
+                    conn_inspector.client_cell().await.unwrap().msg().cmd(),
+                    ChanCmd::DESTROY,
+                );
+                // TODO(relay): I think the relay shouldn't be sending a DESTROY back to the client.
+                // https://gitlab.torproject.org/tpo/core/arti/-/work_items/2648
+                assert_eq!(
+                    conn_inspector.relay_cell().await.unwrap().msg().cmd(),
+                    ChanCmd::DESTROY,
+                );
+            }
+        });
+    }
+
+    // TODO(relay): Test ntor-v3 handshake once implemented.
 }
