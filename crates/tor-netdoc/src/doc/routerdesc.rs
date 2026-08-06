@@ -27,11 +27,6 @@
 //! TODO: There should be accessor functions for some or all of the
 //! fields in RouterDesc.  I'm deferring those until I know what they
 //! should be.
-//!
-//! # Availability
-//!
-//! Most of this module is only available when this crate is built with the
-//! `routerdesc` feature enabled.
 use crate::encode::{ItemEncoder, ItemValueEncodable};
 use crate::parse::keyword::Keyword;
 use crate::parse::parser::{Section, SectionRules};
@@ -1623,7 +1618,6 @@ mod test {
             .unwrap()
             .into_iter()
             .map(|rd| {
-                #[cfg(feature = "incomplete")]
                 rd.clone().verify().unwrap();
                 rd.unwrap_unverified()
             })
@@ -1718,7 +1712,6 @@ mod test {
 
     /// Test for various succeeding and failing verifications.
     #[test]
-    #[cfg(feature = "incomplete")]
     fn test_verify() {
         // Generate keys we will use later.
         let rng = &mut testing_rng();
