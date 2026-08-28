@@ -369,9 +369,15 @@ version = "0.45.0"
 dependencies = [
  "anyhow",
  "clap",
+ "derive-deftly",
+ "digest 0.10.7",
+ "educe",
+ "test-temp-dir",
  "thiserror 2.0.19",
+ "tor-checkable",
  "tor-dirauth",
  "tor-error",
+ "tor-llcrypto",
  "tor-netdoc",
 ]
 
@@ -6834,6 +6840,7 @@ dependencies = [
  "oneshot-fused-workaround",
  "pin-project",
  "postage",
+ "slotmap-careful",
  "sync_wrapper",
  "thiserror 2.0.19",
  "tokio",
@@ -7329,6 +7336,7 @@ version = "0.45.0"
 dependencies = [
  "bytes",
  "digest 0.10.7",
+ "educe",
  "flate2",
  "futures",
  "hex",
