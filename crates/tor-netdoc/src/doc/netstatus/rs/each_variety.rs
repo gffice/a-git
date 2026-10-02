@@ -160,7 +160,7 @@ pub struct RouterStatus {
     ///
     /// <https://spec.torproject.org/dir-spec/consensus-formats.html#item:v>
     #[deftly(constructor)]
-    #[deftly(netdoc(keyword = "pr"))]
+    #[deftly(netdoc(keyword = "pr", with = protovers_flexible))]
     pub protos: Protocols,
 
     /// `w` --- Bandwidth estimates
@@ -175,7 +175,7 @@ pub struct RouterStatus {
     // because that would be non-additive.
     #[deftly(constructor)]
     #[deftly(netdoc(flatten))]
-    pub weight: RelayWeightsItem,
+    pub weight: ns_type!(RelayWeightsItem, RelayWeightsItem, VoteRelayWeightsItem),
 
     /// `p` --- Exit ports summary
     ///
