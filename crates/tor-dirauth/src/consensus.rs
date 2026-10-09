@@ -3,9 +3,12 @@
 use crate::internal_prelude::*;
 
 use tor_netdoc::doc::netstatus::{
-    NetParams, PlainPreamble, RelayWeightsItem, VoteRelayWeightsItem,
+    self, NetParams, PlainPreamble, RelayWeightsItem, VoteRelayWeightsItem,
 };
-use tor_netdoc::types::{NotPresent, relay_flags::DocRelayFlags};
+use tor_netdoc::types::{
+    NotPresent,
+    relay_flags::{DocRelayFlags, RelayFlag},
+};
 
 // md calculations
 mod ip_summary;

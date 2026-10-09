@@ -147,6 +147,20 @@ pub enum ConsensusError {
     Internal(#[from] Bug),
 }
 
+#[ext(name = TiSliceExt)]
+pub(super) impl<V> TiSlice<VoterNum, V> {
+    /// Get the value from one of the votes
+    ///
+    /// Convenience method for `.get(vnum)` which avoids recapitulating the error handling.
+    //
+    // TODO DIRAUTH after !4463 use this in toplevel.rs in
+    //  impl<AC> Aggregate<AC> for netstatus::VoteAuthoritySection
+    fn vote(&self, vnum: VoterNum) -> Result<&V, Bug> {
+        self.get(vnum)
+            .ok_or_else(|| internal!("{vnum:?} out of range"))
+    }
+}
+
 /// "Global" inputs for calculating consensus from votes
 #[derive(Debug, Clone)]
 pub(super) struct ConsensusCommonContext<'r> {
@@ -157,7 +171,10 @@ pub(super) struct ConsensusCommonContext<'r> {
     pub n_authorities: usize,
 
     /// The input votes (in their entirity)
-    pub votes: TiVec<VoterNum, &'r tor_netdoc::doc::netstatus::vote::NetworkStatus>,
+    pub votes: TiVec<VoterNum, &'r netstatus::vote::NetworkStatus>,
+
+    /// The votes' digests (in the same `VoterNum` order)
+    pub sig_hashes: TiVec<VoterNum, &'r netstatus::DirectorySignaturesHashesAccu>,
 }
 
 impl<'r> ConsensusCommonContext<'r> {
@@ -193,6 +210,7 @@ pub(crate) mod test {
                 method: SupportedConsensusMethod::MAX,
                 n_authorities: 0,
                 votes: ti_vec![],
+                sig_hashes: ti_vec![],
             }
         }
     }
