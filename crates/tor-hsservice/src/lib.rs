@@ -24,6 +24,7 @@
 #![warn(clippy::needless_borrow)]
 #![warn(clippy::needless_pass_by_value)]
 #![warn(clippy::option_option)]
+#![warn(clippy::or_fun_call)]
 #![deny(clippy::print_stderr)]
 #![deny(clippy::print_stdout)]
 #![warn(clippy::rc_buffer)]
@@ -366,6 +367,10 @@ impl OnionService {
             status_tx.clone().into(),
         )?;
 
+        let bad_hsdescs_dir = state_handle
+            .raw_subdir("bad_hsdescs")
+            .map_err(StartupError::StateDirectoryInaccessible)?;
+
         let publisher: Publisher<R, publish::Real<R>> = Publisher::new(
             runtime,
             nickname.clone(),
@@ -378,6 +383,7 @@ impl OnionService {
             path_resolver,
             pow_manager.clone(),
             publisher_update_rx,
+            bad_hsdescs_dir,
         );
 
         let svc = Arc::new(RunningOnionService {
