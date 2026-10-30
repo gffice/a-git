@@ -43,6 +43,13 @@ pub(super) trait ComponentInVotes<T>: Iterator<Item = (VoterNum, T)> + Clone {
     fn iter(&self) -> Self {
         self.clone()
     }
+
+    /// Iterate over the voted values
+    ///
+    /// Convenience method equivalent to `.iter().map(|(_vnum, v)| v)`.
+    fn votes(&self) -> impl Iterator<Item = T> + Clone {
+        self.clone().map(|(_vnum, v)| v)
+    }
 }
 impl<I, T> ComponentInVotes<T> for I where I: Iterator<Item = (VoterNum, T)> + Clone {}
 
@@ -66,6 +73,10 @@ pub(super) struct ConsensusContextRefs<'r, AlreadyComputed> {
     /// (as found in the preamble of *this* consensus).
     ///
     /// impls that don't need any precomputed data should be blanket over `AlreadyComputed`.
+    ///
+    /// Generally, when this isn't `()`, we have both the plain and md flavours
+    /// available, but they basically contain the same information.
+    /// So in each case we pass only the plain flavour as the "already computed".
     //
     // The alternatives to this would be:
     //  a. Build the consensus in mutable variables.  But there are a lot of required
@@ -158,6 +169,18 @@ impl<AC, V: Aggregate<AC>> ConsensusesFromVotes<AC> for V {
     }
 }
 
+impl<'r> ConsensusCommonContext<'r> {
+    /// Construct a `ConsensusContextRefs` with a particular "already computed" value
+    ///
+    /// (Also available on `ConsensusContextRefs` via deref.)
+    pub(super) fn with_computed<AC>(&'r self, ac: &'r AC) -> ConsensusContextRefs<'r, AC> {
+        ConsensusContextRefs {
+            context: self,
+            computed: ac,
+        }
+    }
+}
+
 /// Error during calculation of a consensus
 ///
 /// Normally errors at this stage should be avoided, because that would prevent
@@ -207,8 +230,7 @@ pub(super) struct ConsensusCommonContext<'r> {
 impl<'r> ConsensusCommonContext<'r> {
     /// Is `n_some_voters` strictly more than half of all the authorities?
     pub(super) fn is_more_than_half_all_auths(&self, n_some_voters: usize) -> bool {
-        // This way of writing it avoids any possibility of over/under-flow
-        n_some_voters > self.n_authorities / 2
+        is_more_than_half_of(n_some_voters, self.n_authorities)
     }
 
     /// Is `n_some_voters` strictly more than half of all the authorities?

@@ -15,15 +15,14 @@ impl ConsensusesFromVotes<()> for netstatus::vote::NetworkStatus {
     {
         calc! { both.preamble }
 
-        let context = ConsensusContextRefs {
-            context: *context,
-            computed: &plain_preamble,
-        };
+        let context = context.with_computed(&plain_preamble);
 
         calc! { both.routers }
         calc! { both.authority }
 
-        calc! { both.footer = todo() }
+        // TODO DIRAUTH pass (&plain_preamble, &*plain_routers) to footer calculation
+
+        calc! { both.footer }
 
         Ok(construct_both! {
             netstatus::plain::NetworkStatus, netstatus::md::NetworkStatus {
@@ -219,7 +218,6 @@ pub(crate) mod test {
     }
 
     #[test]
-    #[ignore] // TODO DIRAUTH un-ignore when todo()'s removed
     fn compute_for_test_vanilla() {
         compute_test(3, 4, |_, _| Ok(()), |_| Ok(()));
     }
