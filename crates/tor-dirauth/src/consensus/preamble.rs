@@ -106,7 +106,6 @@ pub(super) fn doc_relay_flags_union<'i>(
 //
 // Not `impl Aggregate` because NetParams is a very general type used in all sorts of
 // places, and we don't want them to get this impl by mistake.
-#[allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)]
 pub(super) fn netparams_preamble_aggregate<'i>(
     context: ConsensusContextRefs<()>,
     inputs: impl ComponentInVotes<&'i NetParams<i32>>,
@@ -146,7 +145,7 @@ impl<AC> Aggregate<AC> for netstatus::RecommendedTorVersions {
     where
         Self: 'i,
     {
-        let inputs = inputs.map(|(_vnum, i)| i).filter(|i| i.is_known());
+        let inputs = inputs.votes().filter(|i| i.is_known());
 
         Ok(inputs
             .clone()
@@ -192,7 +191,6 @@ impl Aggregate<()> for Arc<netstatus::ProtoStatuses> {
 //
 // Not `impl Aggregate` because `ProtoStatus` wants to be
 // handled quite differently in a routerstatus.
-#[allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)]
 fn protostatus_preamble_aggregate<'i>(
     context: ConsensusContextRefs<()>,
     inputs: impl ComponentInVotes<&'i netstatus::ProtoStatus>,
@@ -217,9 +215,8 @@ fn protostatus_preamble_aggregate<'i>(
         // but tor-protover does not currently expose that in a suitable form,
         // and it would make the calculation less obvious.
         //
-        let inputs: Vec<HashSet<(tor_protover::Protocol, tor_protover::Value)>> = inputs
-            .map(|(_vnum, i)| i.iter_all().collect())
-            .collect_vec();
+        let inputs: Vec<HashSet<(tor_protover::Protocol, tor_protover::Value)>> =
+            inputs.votes().map(|i| i.iter_all().collect()).collect_vec();
 
         Ok(inputs
             .iter()
