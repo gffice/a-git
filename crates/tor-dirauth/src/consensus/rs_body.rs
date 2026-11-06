@@ -3,6 +3,11 @@
 use super::*;
 use rs_common::*;
 
+/// md digest as it appears in the consensus
+//
+// TODO arguably this should be in tor-netdoc somewhere, but where?
+type MdDigest = FixedB64<{ tor_netdoc::doc::microdesc::DOC_DIGEST_LEN }>;
+
 impl<'i> ResolvedRouterStatusInputs<'i> {
     /// Calculate the plain and md routerstatuses
     ///
@@ -24,10 +29,7 @@ impl<'i> ResolvedRouterStatusInputs<'i> {
         )>,
         ConsensusError,
     > {
-        let inputs = self
-            .per_voter
-            .iter_enumerated()
-            .filter_map(|(vnum, rs_v)| Some((vnum, rs_v.as_ref()?)));
+        let inputs = self.per_voter.iter_enumerated().with_opinions();
 
         /// Copy a field from `self.status_tuple` to the output.
         ///
@@ -41,6 +43,8 @@ impl<'i> ResolvedRouterStatusInputs<'i> {
             };
         }
 
+        let mut md_none_defer = NoneDefer::new();
+
         let (plain_r, md_r) = {
             calc! { both.identity    = self.id.rsa }
             calc! { both.publication = netstatus::IgnoredPublicationTimeSp }
@@ -49,9 +53,7 @@ impl<'i> ResolvedRouterStatusInputs<'i> {
             from_status_tuple! { plain.doc_digest; .into() }
             from_status_tuple! { both.or_port }
             from_status_tuple! { both.dir_port }
-
-            // TODO DIRAUTH replace dummy value; actually calculate which md digest to include
-            calc! { md.doc_digest = Default::default() }
+            calc! { md.doc_digest = NotPresent }
 
             construct_both! {
                 netstatus::plain::RouterStatusIntroItem, netstatus::md::RouterStatusIntroItem {
@@ -64,7 +66,7 @@ impl<'i> ResolvedRouterStatusInputs<'i> {
 
         calc! { both.ed25519_id = NotPresent }
         calc! { plain.m = NotPresent }
-        calc! { plain, md .weight }
+        calc! { plain, md .w }
 
         calc! { out.flags }
         // "routers that do not have the Running flag are not listed at all."
@@ -73,6 +75,7 @@ impl<'i> ResolvedRouterStatusInputs<'i> {
         }
         calc! { both.flags = out_flags.clone() }
         calc! { both.protos }
+        calc! { both.version }
 
         // In principle we could omit writing these, and let Constructor default them,
         // but this way it's clearer that we've thought of every field,
@@ -83,30 +86,36 @@ impl<'i> ResolvedRouterStatusInputs<'i> {
         // TODO DIRAUTH replace dummy values
         calc! { both.a = Default:: default() }
         calc! { plain.port_policy = Default:: default() }
-        calc! { both.version = None }
+
+        let md_m = md_none_defer.handle(
+            {
+                calc! { md.m }
+                Ok::<_, Bug>(md_m)
+            },
+            || [0; 32].into(),
+        )?;
 
         // TODO DIRAUTH replace routerstatus dummy values
-        calc! { md.m = [0; 32].into() }
 
         let (plain, md) = construct_both! {
             netstatus::plain::RouterStatus, netstatus::md::RouterStatus {
-                both. r, m, flags, protos, weight, ed25519_id;
+                both. r, m, flags, protos, w, ed25519_id;
             } {
                 both. a, version, port_policy, stats;
             }
         };
-        Ok(Some((plain, Some(md))))
+        Ok(Some((plain, md_none_defer.finish(md))))
     }
 }
 
-impl Aggregate<RouterStatusAC<'_>> for VoteRelayWeightsItem {
-    type Output = RelayWeightsItem;
+impl Aggregate<RouterStatusAC<'_>> for VoteRelayBandwidthItem {
+    type Output = RelayBandwidthItem;
 
     #[allow(clippy::needless_late_init)] // re median_inputs and unmeasured; clearer this way
     fn aggregate<'i>(
         context: ConsensusContextRefs<RouterStatusAC<'_>>,
-        inputs: impl ComponentInVotes<&'i VoteRelayWeightsItem>,
-    ) -> Result<RelayWeightsItem, ConsensusError>
+        inputs: impl ComponentInVotes<&'i VoteRelayBandwidthItem>,
+    ) -> Result<RelayBandwidthItem, ConsensusError>
     where
         Self: 'i,
     {
@@ -136,6 +145,9 @@ impl Aggregate<RouterStatusAC<'_>> for VoteRelayWeightsItem {
             let max_unmeasured = context
                 .computed
                 .params
+                // no default in the spec, see
+                // https://spec.torproject.org/param-spec.html#voting
+                .without_defaults()
                 .get(MAX_UNMEASURED_BW_PARAM)
                 .copied()
                 // w items are unsigned 32-bit, but it's capped using netparams which are
@@ -149,11 +161,11 @@ impl Aggregate<RouterStatusAC<'_>> for VoteRelayWeightsItem {
             unmeasured = Some((UNMEASURED, 1));
         } else {
             // There were no w lines, or not enough had Measured, or none had Bandwidth
-            return Ok(RelayWeightsItem::default());
+            return Ok(RelayBandwidthItem::default());
         }
 
         let out = chain!([(BANDWIDTH, out)], unmeasured)
-            .collect::<NetParams<_>>()
+            .collect::<ParamValues<_>>()
             .try_into()
             .map_err(into_internal!("generated bad w item"))?;
 
@@ -220,6 +232,58 @@ impl Aggregate<RouterStatusAC<'_>> for DocRelayFlags {
     }
 }
 
+/// Obtain the relevant md digest from a vote rs
+///
+/// Returns `Ok(None)` if this voter didn't provide a relevant md digest for this method.
+///
+/// Throws `Err` if the vote was erroneous.  (This should then be logged.)
+fn md_digest_from_vote(
+    context: ConsensusContextRefs<RouterStatusAC<'_>>,
+    vote: &[netstatus::RouterStatusMdDigestsVote],
+) -> Result<Option<MdDigest>, String> {
+    Ok(vote
+        .iter()
+        .filter(|e| e.consensus_methods.methods.contains(&context.method))
+        .flat_map(|e| &e.digests)
+        .filter(|d| matches!(d.alg, DigestName::Sha256))
+        .map(|d| &*d.value)
+        .at_most_one()
+        .map_err(|_: itertools::ExactlyOneError<_>| "multiple md digests for same router")?
+        .map(|d| FixedB64::from_byte_slice(d).ok_or("wrong md digest len"))
+        .transpose()?)
+}
+
+impl Aggregate<RouterStatusAC<'_>> for Vec<netstatus::RouterStatusMdDigestsVote> {
+    type Output = Option<MdDigest>;
+
+    fn aggregate<'i>(
+        context: ConsensusContextRefs<RouterStatusAC<'_>>,
+        inputs: impl ComponentInVotes<&'i Self>,
+    ) -> Result<Self::Output, ConsensusError>
+    where
+        Self: 'i,
+    {
+        let counts: HashMap<MdDigest, usize> = inputs
+            .iter()
+            .filter_map(|(vnum, v)| {
+                md_digest_from_vote(context, v).unwrap_or_else(|e: String| {
+                    bad_vote!(vnum, "{e}");
+                    None
+                })
+            })
+            .counts();
+
+        let n_opinions = counts.values().sum();
+
+        let selected = counts
+            .into_iter()
+            .find(|(_md, count)| is_more_than_half_of(*count, n_opinions))
+            .map(|(md, _count)| md);
+
+        Ok(selected)
+    }
+}
+
 impl Aggregate<RouterStatusAC<'_>> for tor_protover::Protocols {
     type Output = Self;
 
@@ -236,6 +300,24 @@ impl Aggregate<RouterStatusAC<'_>> for tor_protover::Protocols {
             |pr: &tor_protover::Protocols| pr.to_string(),
         )?
         .unwrap_or_default())
+    }
+}
+
+impl Aggregate<RouterStatusAC<'_>> for Option<netstatus::SoftwareVersion> {
+    type Output = Self;
+
+    fn aggregate<'i>(
+        context: ConsensusContextRefs<RouterStatusAC<'_>>,
+        inputs: impl ComponentInVotes<&'i Self>,
+    ) -> Result<Self::Output, ConsensusError>
+    where
+        Self: 'i,
+    {
+        functions::choose_most_popular_amongst_votes(
+            context,
+            inputs.with_opinions(),
+            functions::ord_string_reverse_choose_lexically_latest,
+        )
     }
 }
 
@@ -340,6 +422,77 @@ mod test {
                 one,
             );
         }
+
+        Ok(())
+    }
+
+    #[test]
+    #[traced_test]
+    fn md_selection() -> anyhow::Result<()> {
+        #[derive(Deftly)]
+        #[derive_deftly(NetdocParseable)]
+        struct TestVote {
+            #[allow(unused)]
+            vote: (),
+            m: Vec<netstatus::RouterStatusMdDigestsVote>,
+        }
+
+        // A x 3: vtKpzB+Vw6LlETW6txvAH+1G6gJIl6x1D/N3NZdPK24
+        // B x 2: PSFWDSIK+sMS6+fkLrc7PSZ6L0Rkscbz2WcmKCDIdOQ
+        let votes = r#"vote # A, with irrelevant SHA1 ignored
+m 1,2,3,METHOD sha256=vtKpzB+Vw6LlETW6txvAH+1G6gJIl6x1D/N3NZdPK24
+m 1,2,3,METHOD sha1=AAAErLudKby6FyVrs1ko3b/Iq6k
+vote # A
+m METHOD sha256=vtKpzB+Vw6LlETW6txvAH+1G6gJIl6x1D/N3NZdPK24
+vote # A
+m METHOD sha256=vtKpzB+Vw6LlETW6txvAH+1G6gJIl6x1D/N3NZdPK24
+vote # B, with irrelevant other method
+m METHOD sha256=PSFWDSIK+sMS6+fkLrc7PSZ6L0Rkscbz2WcmKCDIdOQ
+m 1 sha256=PSFWDSIK+sMS6+fkLrc7PSZ6L0Rkscbz2WcmKCDIdOQ
+vote # B
+m METHOD sha256=PSFWDSIK+sMS6+fkLrc7PSZ6L0Rkscbz2WcmKCDIdOQ
+vote # BX but multiple values, so ignored
+m METHOD sha256=PSFWDSIK+sMS6+fkLrc7PSZ6L0Rkscbz2WcmKCDIdOQ
+m METHOD sha256=PSFWDSIK+sMS6+fkLrc7PSZ6L0Rkscbz2WcmKCDIdOQ
+m METHOD sha256=PSFWDSIK+sMS6+fkLrc7PSZ6L0Rkscbz2WcmKCDIdOQ
+m METHOD sha256=PSFWDSIK+sMS6+fkLrc7PSZ6L0Rkscbz2WcmKCDIdOQ
+m METHOD sha256=PSFWDSIK+sMS6+fkLrc7PSZ6L0Rkscbz2WcmKCDIdOQ
+vote # B but only for irrelevant methods
+m 1,2,3 sha256=PSFWDSIK+sMS6+fkLrc7PSZ6L0Rkscbz2WcmKCDIdOQ
+"#;
+
+        let votes = votes.replace("METHOD", &SupportedConsensusMethod::MAX.to_string());
+        println!("----- test votes -----\n{votes}----- ^ test votes -----");
+
+        let votes: Vec<TestVote> = parse_netdoc_multiple(&ParseInput::new(&votes, "<test data>"))?;
+
+        const NICK: &str = "lisdex";
+
+        compute_test(
+            votes.len(),
+            12,
+            |i, vote| {
+                vote.routers
+                    .iter_mut()
+                    .find(|rs| rs.r.nickname.as_str() == NICK)
+                    .unwrap()
+                    .m = votes[i].m.clone();
+                Ok(())
+            },
+            |(_plain, md)| {
+                let m = &md
+                    .routers
+                    .iter()
+                    .find(|rs| rs.r.nickname.as_str() == NICK)
+                    .expect("output router missing")
+                    .m;
+                assert_eq!(
+                    m,
+                    &"vtKpzB+Vw6LlETW6txvAH+1G6gJIl6x1D/N3NZdPK24".parse::<MdDigest>()?,
+                );
+                Ok(())
+            },
+        );
 
         Ok(())
     }

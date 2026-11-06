@@ -13,10 +13,11 @@
 use crate::internal_prelude::*;
 
 use tor_netdoc::doc::netstatus::{
-    self, NetParams, PlainPreamble, RelayWeightsItem, VoteRelayWeightsItem,
+    self, NetParamValues, NetParams, ParamValues, PlainPreamble, RelayBandwidthItem,
+    VoteRelayBandwidthItem,
 };
 use tor_netdoc::types::{
-    NotPresent,
+    DigestName, NotPresent,
     relay_flags::{DocRelayFlags, RelayFlag},
 };
 
@@ -28,9 +29,10 @@ mod tracked_method;
 
 // consensus calculations
 #[macro_use]
+mod framework;
+#[macro_use]
 mod calculate_macros;
 mod footer;
-mod framework;
 mod functions;
 mod preamble;
 #[macro_use]
@@ -40,6 +42,7 @@ mod rs_select;
 mod toplevel;
 
 pub use framework::*;
+use functions::ComponentInVotesOptionExt;
 pub use method::*;
 pub use microdesc::*;
 pub use toplevel::*;
