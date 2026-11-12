@@ -451,6 +451,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "tracing-test",
  "void",
  "web-time-compat",
 ]
@@ -7538,6 +7539,7 @@ dependencies = [
  "derive_more",
  "educe",
  "extend",
+ "humantime",
  "ipnet",
  "itertools 0.15.0",
  "num-traits",

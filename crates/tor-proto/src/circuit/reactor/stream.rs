@@ -20,6 +20,7 @@ use crate::stream::incoming::{
 
 use tor_async_utils::{SinkTrySend as _, SinkTrySendError as _};
 use tor_cell::chancell::CircId;
+use tor_cell::relaycell::flow_ctrl::XonKBpsEwma;
 use tor_cell::relaycell::msg::{AnyRelayMsg, Begin, BeginDir, End, EndReason, Resolve};
 use tor_cell::relaycell::{
     AnyRelayMsgOuter, RelayCellFormat, RelayCmd, StreamId, UnparsedRelayMsg,
@@ -32,12 +33,12 @@ use derive_deftly::Deftly;
 use futures::SinkExt;
 use futures::channel::mpsc;
 use futures::{FutureExt as _, StreamExt as _, future, select_biased};
-use tracing::debug;
+use tracing::{debug, trace};
 
 use std::pin::Pin;
 use std::result::Result as StdResult;
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
 /// Trait for customizing the behavior of the stream reactor.
@@ -177,32 +178,27 @@ impl StreamReactor {
             .remove_expired_halfstreams(self.time_provider.now());
 
         let streams = Arc::clone(self.hop.stream_map());
-        let can_send = self
-            .hop
-            .ccontrol()
-            .lock()
-            .expect("poisoned lock")
-            .can_send();
+        let ccontrol = Arc::clone(self.hop.ccontrol());
         let ready_streams_fut = future::poll_fn(move |cx| {
-            if !can_send {
-                // We can't send anything on this hop that counts towards SENDME windows.
-                //
-                // Note: this does not block outgoing flow-control messages:
-                //
-                //   * circuit SENDMEs are initiated by the forward reactor,
-                //     by sending a BackwardReactorCmd::SendRelayMsg to BWD,
-                //   * stream SENDMEs will be initiated by StreamTarget::send_sendme(),
-                //     by sending a control message to the reactor
-                //     (TODO(relay): not yet implemented)
-                //   * XOFFs are sent in response to messages on streams
-                //     (i.e. RELAY messages with non-zero stream IDs).
-                //     These messages are delivered to us by the forward reactor
-                //     inside BackwardReactorCmd::HandleMsg
-                //   * XON will be initiated by StreamTarget::drain_rate_update(),
-                //     by sending a control message to the reactor
-                //     (TODO(relay): not yet implemented)
-                return Poll::Pending;
-            }
+            // We can't send anything on this hop that counts towards SENDME windows.
+            //
+            // Note: this does not block outgoing flow-control messages:
+            //
+            //   * circuit SENDMEs are initiated by the forward reactor,
+            //     by sending a BackwardReactorCmd::SendRelayMsg to BWD,
+            //   * stream SENDMEs will be initiated by StreamTarget::send_sendme(),
+            //     by sending a control message to the reactor
+            //     (TODO(relay): not yet implemented)
+            //   * XOFFs are sent in response to messages on streams
+            //     (i.e. RELAY messages with non-zero stream IDs).
+            //     These messages are delivered to us by the forward reactor
+            //     inside BackwardReactorCmd::HandleMsg
+            //   * XON will be initiated by StreamTarget::drain_rate_update(),
+            //     by sending a control message to the reactor
+            //     (TODO(relay): not yet implemented)
+            //
+            // We'll be woken up via `cx.waker()` once we get a SENDME.
+            ready!(ccontrol.lock().expect("poisoned lock").poll_can_send(cx));
 
             let mut streams = streams.lock().expect("lock poisoned");
             let Some((sid, msg)) = streams.poll_ready_streams_iter(cx).next() else {
@@ -266,7 +262,34 @@ impl StreamReactor {
                 self.close_stream(stream_id, behav, streammap::TerminateReason::ExplicitEnd)
                     .await
             }
+            CtrlMsg::DrainRateUpdate { stream_id, rate } => {
+                self.maybe_send_xon(stream_id, rate).await
+            }
         }
+    }
+
+    /// Maybe send an XON for the `stream_id` with the given `rate`.
+    async fn maybe_send_xon(
+        &mut self,
+        stream_id: StreamId,
+        rate: XonKBpsEwma,
+    ) -> StdResult<(), ReactorError> {
+        let Some(xon) = self.hop.maybe_send_xon(rate, stream_id)? else {
+            // Nothing to do. This can happen if stream is closed, XON/XOFF are not in
+            // use or or the stream is still above its XOFF limit.
+            return Ok(());
+        };
+
+        trace!(
+            circ_id = %self.unique_id,
+            stream_id = %stream_id,
+            "Sending XON with rate {rate}",
+        );
+
+        // Deliver the XON to the backward reactor which will send it back to the client
+        // (if we're a relay), or exit (if we're a client).
+        let msg = AnyRelayMsgOuter::new(Some(stream_id), xon.into());
+        self.send_msg_to_bwd(msg).await
     }
 
     /// Deliver `msg` to the specified stream
@@ -693,5 +716,13 @@ pub(crate) enum CtrlMsg {
         stream_id: StreamId,
         /// The END message to send, if any.
         behav: CloseStreamBehavior,
+    },
+
+    /// Indicate that the drain rate of a specific stream has changed to the given value.
+    DrainRateUpdate {
+        /// The stream ID to send the XON on.
+        stream_id: StreamId,
+        /// The drain rate to advertise in the XON.
+        rate: XonKBpsEwma,
     },
 }

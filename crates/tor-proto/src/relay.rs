@@ -10,7 +10,6 @@
 //! See the design notes at doc/dev/notes/relay-reactor.md
 
 pub(crate) mod channel;
-#[allow(unreachable_pub)] // TODO(relay): use in tor-chanmgr(?)
 pub mod channel_provider;
 pub(crate) mod reactor;
 
@@ -45,7 +44,6 @@ use crate::stream::StreamTarget;
 #[derive_deftly(RestrictedChanMsgSet)]
 #[deftly(usage = "on an open relay circuit")]
 #[cfg(feature = "relay")]
-#[cfg_attr(not(test), allow(unused))] // TODO(relay)
 pub(crate) enum RelayCircChanMsg {
     /// A relay cell telling us some kind of remote command from some
     /// party on the circuit.
@@ -59,7 +57,6 @@ pub(crate) enum RelayCircChanMsg {
 }
 
 /// A handle for interacting with a relay circuit.
-#[allow(unused)] // TODO(relay)
 #[derive(Debug)]
 pub struct RelayCirc(pub(crate) CircReactorHandle<Forward, Backward>);
 
@@ -90,14 +87,17 @@ impl RelayCirc {
         stream_id: StreamId,
         rate: XonKBpsEwma,
     ) -> crate::Result<()> {
-        let msg = backward::CtrlMsg::FlowCtrlUpdate {
+        // Inform the stream reactor which will then take the decision on sending the
+        // XON/XOFF. That is why we need to send it to the forward reactor as it will
+        // re-route it to the stream reactor.
+        let cmd = forward::CtrlCmd::StreamDrainRateUpdate {
             hop: None,
-            msg: backward::FlowCtrlMsg::Xon(rate),
             stream_id,
+            rate,
         };
         self.0
-            .control
-            .unbounded_send(msg.into())
+            .command
+            .unbounded_send(CtrlCmd::Forward(cmd))
             .map_err(|_| Error::CircuitClosed)?;
 
         Ok(())

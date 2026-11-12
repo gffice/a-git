@@ -20,7 +20,6 @@ use crate::client::circuit::padding::{
 
 use tor_cell::chancell::msg::{AnyChanMsg, Relay};
 use tor_cell::chancell::{AnyChanCell, BoxedCellBody, ChanCmd, CircId};
-use tor_cell::relaycell::flow_ctrl::XonKBpsEwma;
 use tor_cell::relaycell::msg::{Sendme, SendmeTag};
 use tor_cell::relaycell::{AnyRelayMsgOuter, RelayCellFormat, RelayCmd, StreamId};
 use tor_error::internal;
@@ -201,7 +200,6 @@ pub(crate) enum BackwardCellDisposition {
     Forward(AnyChanMsg),
 }
 
-#[allow(unused)] // TODO(relay)
 impl<B: BackwardHandler> BackwardReactor<B> {
     /// Create a new [`BackwardReactor`].
     #[allow(clippy::too_many_arguments)] // TODO
@@ -262,8 +260,6 @@ impl<B: BackwardHandler> BackwardReactor<B> {
     /// and so this will only really drive Tor stream data,
     /// delivering at most 2 cells per call.
     async fn run_once(&mut self) -> StdResult<(), ReactorError> {
-        use postage::prelude::{Sink as _, Stream as _};
-
         /// The maximum number of events we expect to handle per reactor loop.
         ///
         /// This is bounded by the number of futures we push into the PollAll.
@@ -501,9 +497,6 @@ impl<B: BackwardHandler> BackwardReactor<B> {
                         ccontrol: Arc::clone(&cc),
                     }))
                 }
-                FlowCtrlMsg::Xon(rate) => {
-                    todo!()
-                }
             },
         }
     }
@@ -614,6 +607,7 @@ impl<B: BackwardHandler> BackwardReactor<B> {
 
     /// Determine how exactly to handle a request to handle padding.
     #[cfg(feature = "circ-padding")]
+    #[allow(unused)] // TODO(relay)
     fn padding_disposition(&self, send_padding: &padding::SendPadding) -> CircPaddingDisposition {
         crate::circuit::padding::padding_disposition(
             send_padding,
@@ -731,7 +725,9 @@ impl<B: BackwardHandler> BackwardReactor<B> {
             .await?;
 
         if cmd == RelayCmd::SENDME {
-            ccontrol.lock().expect("poisoned lock").note_sendme_sent();
+            // TODO: does note_sendme_sent() need to be fallible?
+            // Neither Vegas nor the fixed-window impl ever return Err
+            ccontrol.lock().expect("poisoned lock").note_sendme_sent()?;
         }
 
         Ok(())
@@ -969,6 +965,4 @@ pub(crate) enum BackwardReactorCmd {
 pub(crate) enum FlowCtrlMsg {
     /// Send a SENDME message on this stream.
     Sendme,
-    /// Send an XON message on this stream with the given rate.
-    Xon(XonKBpsEwma),
 }

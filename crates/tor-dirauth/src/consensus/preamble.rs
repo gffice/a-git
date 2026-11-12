@@ -23,11 +23,28 @@ impl ConsensusesFromVotes<()> for netstatus::vote::Preamble {
         calc! { md,plain .known_flags <+ doc_relay_flags_union }
         calc! { md,plain .params <+ netparams_preamble_aggregate }
 
-        // TODO DIRAUTH replace dummy values
+        // shared-rand-* in output come from:
+        //   - lifetime and therefore timing, as determined for this vote
+        //   - netparams, as determined for this vote
+        //   - authority section's shared-rand-*, in votes
+        let plain_shared_rand;
+        let md_shared_rand;
+        {
+            let computed = SrvAC {
+                lifetime: &plain_lifetime,
+                params: &plain_params,
+            };
+            let context = context.with_computed(&computed);
+            let inputs = context
+                .votes
+                .iter_enumerated()
+                .map(|(vnum, v)| (vnum, &v.authority.authority));
+            calc_assign! { both.shared_rand }
+        };
+
         calc! { both.voting_delay }
         calc! { both.client_versions }
         calc! { both.server_versions }
-        calc! { both.shared_rand = Default::default() }
 
         Ok(construct_both! {
             netstatus::plain::Preamble, netstatus::md::Preamble {
@@ -192,9 +209,10 @@ impl Aggregate<()> for Arc<netstatus::ProtoStatuses> {
 }
 
 /// Calculate the `{recommended,required}-*-protocols` items in a consensus
-//
-// Not `impl Aggregate` because `ProtoStatus` wants to be
-// handled quite differently in a routerstatus.
+///
+/// Has the signature of [`Aggregate::aggregate`] for [`netstatus::ProtoStatus`].
+/// Not `impl Aggregate` because `ProtoStatus` wants to be
+/// handled quite differently in a routerstatus.
 fn protostatus_preamble_aggregate<'i>(
     context: ConsensusContextRefs<()>,
     inputs: impl ComponentInVotes<&'i netstatus::ProtoStatus>,
