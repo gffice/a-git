@@ -244,6 +244,7 @@ dependencies = [
  "tor-config-shared",
  "tor-error",
  "tor-general-addr",
+ "tor-geoip",
  "tor-hsclient",
  "tor-hscrypto",
  "tor-hsrproxy",
@@ -372,6 +373,7 @@ dependencies = [
  "derive_more",
  "digest 0.11.3",
  "educe",
+ "itertools 0.15.0",
  "test-temp-dir",
  "thiserror 2.0.21",
  "tor-checkable",
@@ -7786,11 +7788,15 @@ dependencies = [
 name = "tor-geoip"
 version = "0.48.0"
 dependencies = [
+ "derive-deftly",
  "derive_more",
  "proptest",
  "rangemap",
+ "serde",
+ "serde_with",
  "thiserror 2.0.21",
  "tor-geoip-db",
+ "tor-rpcbase",
 ]
 
 [[package]]
@@ -8062,7 +8068,6 @@ name = "tor-keymgr"
 version = "0.48.0"
 dependencies = [
  "amplify",
- "arrayvec",
  "cfg-if",
  "data-encoding",
  "derive-deftly",
