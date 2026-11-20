@@ -2,8 +2,6 @@
 
 use super::*;
 
-// TODO DIRAUTH integration tests of consensus calculation
-
 impl ConsensusesFromVotes<()> for netstatus::vote::Preamble {
     type PlainOutput = netstatus::plain::Preamble;
     type MdOutput = netstatus::md::Preamble;
@@ -107,7 +105,6 @@ impl<AC> Aggregate<AC> for netstatus::VotingDelay {
 }
 
 /// Calculate the union of two `DocRelayFlags`z
-#[allow(clippy::needless_pass_by_value)]
 pub(super) fn doc_relay_flags_union<'i>(
     _context: ConsensusContextRefs<()>,
     inputs: impl ComponentInVotes<&'i DocRelayFlags>,
@@ -142,7 +139,8 @@ pub(super) fn netparams_preamble_aggregate<'i>(
                 .filter_map(|i| i.without_defaults().get(k))
                 .copied();
             let n_opinions = opinions.clone().count();
-            let want = context.is_more_than_half_all_auths(n_opinions) || n_opinions >= MIN_THRESH;
+            let want = context.is_enough_of_all_auths::<MoreThanHalf>(n_opinions)
+                || n_opinions >= MIN_THRESH;
             if !want {
                 return None;
             }
@@ -173,7 +171,7 @@ impl<AC> Aggregate<AC> for netstatus::RecommendedTorVersions {
             .flat_map(|i| i.iter())
             .unique()
             .try_filter(|k| {
-                is_true_for_more_than_half_of(
+                MoreThanHalf::is_true_for_enough_of(
                     //
                     inputs.clone(),
                     |i| Ok::<_, Bug>(i.contains(&**k)),
@@ -254,11 +252,11 @@ fn protostatus_preamble_aggregate<'i>(
 
     calc! {
         out.recommended <+ aggregate_by_threshold;
-        , ConsensusCommonContext::is_more_than_half_all_auths
+        , ConsensusCommonContext::is_enough_of_all_auths::<MoreThanHalf>
     }
     calc! {
         out.required <+ aggregate_by_threshold;
-        , ConsensusCommonContext::is_at_least_two_thirds_all_auths
+        , ConsensusCommonContext::is_enough_of_all_auths::<AtLeastTwoThirds>
     }
 
     Ok(construct! {

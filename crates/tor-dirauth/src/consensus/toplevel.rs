@@ -52,10 +52,10 @@ impl ConsensusesFromVotes<()> for netstatus::vote::NetworkStatus {
 
         Ok(construct_both! {
             netstatus::plain::NetworkStatus, netstatus::md::NetworkStatus {
-                both. authority, footer, preamble;
+                both. preamble, authority, footer;
             } {
+                // `network_status_version` and `vote_status`: unit tokens, Default is fine
                 both. routers;
-                // TODO DIRAUTH NetworkStatus fields missing
             }
         })
     }
@@ -117,13 +117,7 @@ impl<AC> Aggregate<AC> for netstatus::VoteAuthoritySection {
 
         let (authorities, superseded_keys) = inputs
             .map(|(vnum, vas)| {
-                let (cae, lkey) = vote2consensus(
-                    &vas.authority,
-                    context
-                        .sig_hashes
-                        .get(vnum)
-                        .ok_or_else(|| internal!("{vnum:?}"))?,
-                )?;
+                let (cae, lkey) = vote2consensus(&vas.authority, context.sig_hashes.vote(vnum)?)?;
                 Ok::<_, Bug>((Some(cae), lkey))
             })
             .process_results(|i| i.filter_collect_unzip())?;
@@ -140,7 +134,9 @@ impl<AC> Aggregate<AC> for netstatus::VoteAuthoritySection {
 /// ### Security
 ///
 /// It is the caller's responsibility to check that each of the `votes`
-/// came from a recognised authority.
+/// came from a distinct recognised authority.
+/// Normally this will be assured by the APIs in `tor-netdoc`,
+/// particularly [`netstatus::vote::NetworkStatusUnverified::verify`].
 pub fn compute_consensus_from_votes_method<'v>(
     method: SupportedConsensusMethod,
     n_authorities: usize,

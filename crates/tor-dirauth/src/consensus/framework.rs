@@ -5,7 +5,6 @@ use super::*;
 /// Report a problem with a vote.
 //
 // TODO DIRAUTH this should be rate limited or something maybe?
-// TODO DIRAUTH voter number is not very useful to log here!
 // TODO DIRAUTH arguably this is more serious than debug, but what about compatibility?
 macro_rules! bad_vote { { $context:expr, $vnum:expr, $($msg:tt)* } => { {
     let vnum: VoterNum = $vnum;
@@ -228,9 +227,6 @@ pub(super) impl<V> TiSlice<VoterNum, V> {
     /// Get the value from one of the votes
     ///
     /// Convenience method for `.get(vnum)` which avoids recapitulating the error handling.
-    //
-    // TODO DIRAUTH after !4463 use this in toplevel.rs in
-    //  impl<AC> Aggregate<AC> for netstatus::VoteAuthoritySection
     fn vote(&self, vnum: VoterNum) -> Result<&V, Bug> {
         self.get(vnum)
             .ok_or_else(|| internal!("{vnum:?} out of range"))
@@ -257,24 +253,9 @@ pub(super) struct ConsensusCommonContext<'r> {
 }
 
 impl<'r> ConsensusCommonContext<'r> {
-    /// Is `n_some_voters` strictly more than half of all the authorities?
-    pub(super) fn is_more_than_half_all_auths(&self, n_some_voters: usize) -> bool {
-        is_more_than_half_of(n_some_voters, self.n_authorities)
-    }
-
-    /// Is `n_some_voters` strictly more than half of all the authorities?
-    pub(super) fn is_at_least_two_thirds_all_auths(&self, n_some_voters: usize) -> bool {
-        // Overflow ought to be impossible since it would involve an unreasonable number
-        // of authorities, but in that case return `fale`.
-        //
-        // The alternative would be to suppress the rule against possibly-panicking arithmetic,
-        // which would impose an additional review burden.
-        let thresh = match self.n_authorities.checked_mul(2) {
-            Some(y) => y,
-            None => return false,
-        }
-        .div_ceil(3);
-        n_some_voters >= thresh
+    /// Is `n_some_voters` a big enough proprtion of all the authorities, according to `rule`?
+    pub(super) fn is_enough_of_all_auths<Rule: ThresholdRule>(&self, n_some_voters: usize) -> bool {
+        Rule::is_enough_of(n_some_voters, self.n_authorities)
     }
 }
 
@@ -294,6 +275,7 @@ pub(crate) mod test {
     #![allow(clippy::needless_pass_by_value)]
     #![allow(clippy::string_slice)] // See arti#2571
     //! <!-- @@ end test lint list maintained by maint/add_warning @@ -->
+    #![allow(clippy::arithmetic_side_effects)]
     use super::*;
 
     impl ConsensusCommonContext<'static> {
@@ -310,46 +292,11 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn is_more_than_half_all_auths() {
-        // This test case is rather like is_for_more_than_half_of_t in functions.rs
+    fn threshold_of_all_auths() {
+        use crate::threshold::test::ExpectOneOutOfTwo;
 
         let mut context = ConsensusCommonContext::new_for_test();
-
-        let mut check = |n_authorities, minimum_that_is_more_than_half| {
-            context.n_authorities = n_authorities;
-            for t in 0..=(n_authorities + 1) {
-                assert_eq!(
-                    context.is_more_than_half_all_auths(t),
-                    t >= minimum_that_is_more_than_half,
-                );
-            }
-        };
-
-        check(0, 1);
-        check(1, 1);
-        check(2, 2);
-        check(3, 2);
-        check(4, 3);
-        check(5, 3);
-    }
-
-    #[test]
-    fn is_at_least_two_thirds_all_auths() {
-        let mut context = ConsensusCommonContext::new_for_test();
-
-        let mut check = |t, n_authorities| {
-            context.n_authorities = n_authorities;
-            assert_eq!(
-                context.is_at_least_two_thirds_all_auths(t),
-                t * 3 >= 2 * n_authorities,
-                "{t} out of {n_authorities}",
-            );
-        };
-
-        for n_authorities in 0..20 {
-            for t in 0..n_authorities {
-                check(t, n_authorities);
-            }
-        }
+        context.n_authorities = 2;
+        context.is_enough_of_all_auths::<ExpectOneOutOfTwo>(1);
     }
 }

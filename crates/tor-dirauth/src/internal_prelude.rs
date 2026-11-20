@@ -30,11 +30,12 @@ pub(crate) use tor_netdoc::{
     doc::routerdesc::RouterDesc,
     encode::encode_netdoc_unsigned,
     rangemap_mutate_range,
-    types::family::{RelayFamily, RelayFamilyIds},
+    types::family::HappyFamilyIds,
     types::policy::PortPolicy,
     types::{Base64Fingerprint, Ed25519Public, FixedB64, Iso8601TimeSp, Nickname},
 };
 
+pub(crate) use crate::threshold::*;
 pub(crate) use crate::utils::*;
 
 #[cfg(test)]
