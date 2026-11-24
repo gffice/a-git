@@ -2,17 +2,17 @@
 
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
-use std::str::FromStr as _;
+use std::num::NonZero;
 use std::time::Duration;
 
 use either::Either;
 use futures::io::BufReader;
-use tor_cell::relaycell::msg::{BeginFlags, Connected, End, EndReason};
+use tor_cell::relaycell::msg::{BeginAddr, BeginFlags, Connected, End, EndReason};
 use tor_error::{internal, trace_report, warn_report};
 use tor_proto::stream::{IncomingStream, IncomingStreamRequest};
 use tor_rtcompat::SleepProviderExt as _;
 use tor_rtcompat::{NetStreamProvider, Runtime, TimeoutError};
-use tracing::{debug, info, trace};
+use tracing::{info, trace};
 
 use crate::stream::dns::resolver::{DnsResolver, LookupAnswers, LookupError, RecordData};
 
@@ -52,38 +52,29 @@ pub(super) async fn handle_begin<R: Runtime>(
     // Assign these to local variables to ensure we use all of them.
     let (addr, port, flags) = (msg.addr(), msg.port(), msg.flags());
 
-    if port == 0 {
-        incoming
-            .reject(End::new_with_reason(EndReason::EXITPOLICY))
-            .await?;
-        debug!("Rejecting incoming stream with 0 port");
-        return Ok(());
-    }
-
-    // TODO(relay): It would be good to parse this in a more principled way.
-    // More specifically, the parsing/decoding should probably be handled by `Begin` in tor-cell
-    // that ensures that it's parsed according to the spec.
-    // See https://gitlab.torproject.org/tpo/core/arti/-/merge_requests/4421.
-    let Ok(addr) = std::str::from_utf8(addr) else {
-        incoming
-            .reject(End::new_with_reason(EndReason::TORPROTOCOL))
-            .await?;
-        debug!("Rejecting incoming stream with non-utf8 address");
-        return Ok(());
+    let addr = match addr.decode() {
+        Ok(x) => x,
+        Err(e) => {
+            trace!("Rejecting incoming stream with invalid address: {e}");
+            incoming
+                .reject(End::new_with_reason(EndReason::TORPROTOCOL))
+                .await?;
+            return Ok(());
+        }
     };
 
     // A future for everything we want to include within the timeout.
     // Returns the TCP stream, and on error returns the END reason.
-    let exit_stream_fut = match IpAddr::from_str(addr) {
-        Ok(addr) => {
-            let addr = SocketAddr::new(addr, port);
+    let exit_stream_fut = match addr {
+        BeginAddr::Ip(addr) => {
+            let addr = SocketAddr::new(addr, port.get());
             let fut = connect_ip(&runtime, addr, flags, &connect_options);
             Either::Left(fut)
         }
-        Err(_) => {
+        BeginAddr::Hostname(ref addr) => {
             let fut = connect_hostname(
                 &runtime,
-                addr.as_bytes(),
+                addr.as_ref(),
                 port,
                 flags,
                 resolver,
@@ -160,10 +151,7 @@ async fn connect_ip<R: Runtime>(
         return Err(EndReason::EXITPOLICY);
     }
 
-    match runtime.connect(&addr, connect_options).await {
-        Ok(x) => Ok(x),
-        Err(e) => Err(io_error_kind_to_end_reason(e.kind())),
-    }
+    tcp_connect(runtime, &addr, connect_options).await
 }
 
 /// For a BEGIN message containing a hostname and flags,
@@ -171,11 +159,13 @@ async fn connect_ip<R: Runtime>(
 async fn connect_hostname<R: Runtime>(
     runtime: &R,
     hostname: &[u8],
-    port: u16,
+    port: NonZero<u16>,
     flags: BeginFlags,
     mut resolver: DnsResolver,
     connect_options: &<R as NetStreamProvider<SocketAddr>>::ConnectOptions,
 ) -> Result<<R as NetStreamProvider<SocketAddr>>::Stream, EndReason> {
+    let port = port.get();
+
     let answers = match resolver.resolve(hostname).await {
         Ok(x) => x,
         Err(LookupError::NonAsciiHostname) => {
@@ -267,9 +257,26 @@ async fn connect_hostname<R: Runtime>(
 
     let addr = SocketAddr::new(*addr, port);
 
-    match runtime.connect(&addr, connect_options).await {
+    tcp_connect(runtime, &addr, connect_options).await
+}
+
+/// Helper to establish the TCP connection and get the correct error "reason" to use in the END
+/// message if needed.
+async fn tcp_connect<R: Runtime>(
+    runtime: &R,
+    addr: &SocketAddr,
+    connect_options: &<R as NetStreamProvider<SocketAddr>>::ConnectOptions,
+) -> Result<<R as NetStreamProvider<SocketAddr>>::Stream, EndReason> {
+    match runtime.connect(addr, connect_options).await {
         Ok(x) => Ok(x),
-        Err(e) => Err(io_error_kind_to_end_reason(e.kind())),
+        Err(e) => {
+            let reason = io_error_kind_to_end_reason(e.kind());
+            if reason == EndReason::INTERNAL {
+                let bug = internal!("Unexpected io error {}: {}", e.kind(), e);
+                trace_report!(bug, "Unexpected {reason} when connecting to TCP address");
+            }
+            Err(reason)
+        }
     }
 }
 
@@ -277,18 +284,34 @@ async fn connect_hostname<R: Runtime>(
 //
 // TODO: Later we will probably have some sort of exit policy object,
 // and we can remove this function and just call `exit_policy.allows(addr)` or something.
-fn exit_policy_allows(addr: SocketAddr) -> bool {
+fn exit_policy_allows(mut addr: SocketAddr) -> bool {
+    // Canonicalize the IP address to ensure that we handle IPv4-mapped IPv6 addresses.
+    // For example if an exit policy disallows `a.b.c.d`, we should also disallow `::ffff:a.b.c.d`.
+    addr.set_ip(addr.ip().to_canonical());
+
     // TODO(relay): Need to support an exit policy. Currently we allow exits to anywhere (except
     // basic loopback checks) for testing purposes.
-    !addr.ip().to_canonical().is_loopback() && !addr.ip().to_canonical().is_unspecified()
+    !addr.ip().is_loopback() && !addr.ip().is_unspecified()
 }
 
 /// For a TCP error, get the reason we should use in the END message.
 fn io_error_kind_to_end_reason(e: ErrorKind) -> EndReason {
-    // TODO(relay): Check if there are other error kinds to map to end reasons.
     match e {
         ErrorKind::ConnectionRefused => EndReason::CONNECTREFUSED,
         ErrorKind::ConnectionReset => EndReason::CONNRESET,
+        ErrorKind::HostUnreachable => EndReason::NOROUTE,
+        // Linux "no route to host" errors are given for EHOSTUNREACH,
+        // and "network is unreachable" errors are given for ENETUNREACH.
+        // But `EndReason` doesn't have a `ENETUNREACH`-equivalent so
+        // we just reuse `NOROUTE` here.
+        ErrorKind::NetworkUnreachable => EndReason::NOROUTE,
+        // We implement our own timeout in the async code and we don't expect to have a TCP timeout
+        // here, so this is probably a bug.
+        ErrorKind::TimedOut => EndReason::INTERNAL,
+        ErrorKind::QuotaExceeded => EndReason::RESOURCELIMIT,
+        ErrorKind::OutOfMemory => EndReason::RESOURCELIMIT,
+        // TODO(nightly: io_error_too_many_open_files): `TooManyOpenFiles` should probably return
+        // `RESOURCELIMIT`.
         _ => EndReason::MISC,
     }
 }
