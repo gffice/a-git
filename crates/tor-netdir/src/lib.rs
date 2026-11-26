@@ -78,7 +78,7 @@ use tor_linkspec::{
 use tor_llcrypto as ll;
 use tor_llcrypto::pk::{ed25519::Ed25519Identity, rsa::RsaIdentity};
 use tor_netdoc::doc::microdesc::{MdDigest, MicrodescAndHash};
-use tor_netdoc::doc::netstatus::{self, MdConsensus, MdRouterStatus};
+use tor_netdoc::doc::netstatus::{self, MdRouterStatus, md::NetworkStatus as MdConsensus};
 #[cfg(feature = "hs-common")]
 use {hsdir_ring::HsDirRing, std::iter};
 
@@ -147,7 +147,7 @@ pub(crate) trait ConsensusRelays {
 }
 impl ConsensusRelays for MdConsensus {
     fn c_relays(&self) -> &TiSlice<RouterStatusIdx, MdRouterStatus> {
-        TiSlice::from_ref(MdConsensus::relays(self))
+        TiSlice::from_ref(&self.routers)
     }
 }
 impl ConsensusRelays for NetDir {
@@ -264,8 +264,6 @@ impl SubnetConfig {
 /// Derived from network parameters.
 #[derive(Clone, Copy, Debug)]
 pub struct FamilyRules {
-    /// If true, we use family information from lists of family members.
-    use_family_lists: bool,
     /// If true, we use family information from lists of family IDs and from family certs.
     use_family_ids: bool,
 }
@@ -273,7 +271,6 @@ pub struct FamilyRules {
 impl<'a> From<&'a NetParameters> for FamilyRules {
     fn from(params: &'a NetParameters) -> Self {
         FamilyRules {
-            use_family_lists: bool::from(params.use_family_lists),
             use_family_ids: bool::from(params.use_family_ids),
         }
     }
@@ -283,7 +280,6 @@ impl FamilyRules {
     /// Return a `FamilyRules` that will use all recognized kinds of family information.
     pub fn all_family_info() -> Self {
         Self {
-            use_family_lists: true,
             use_family_ids: true,
         }
     }
@@ -291,16 +287,8 @@ impl FamilyRules {
     /// Return a `FamilyRules` that will ignore all family information declared by relays.
     pub fn ignore_declared_families() -> Self {
         Self {
-            use_family_lists: false,
             use_family_ids: false,
         }
-    }
-
-    /// Configure this `FamilyRules` to use (or not use) family information from
-    /// lists of family members.
-    pub fn use_family_lists(&mut self, val: bool) -> &mut Self {
-        self.use_family_lists = val;
-        self
     }
 
     /// Configure this `FamilyRules` to use (or not use) family information from
@@ -314,7 +302,6 @@ impl FamilyRules {
     /// requested by `self` or by `other`.
     pub fn union(&self, other: &Self) -> Self {
         Self {
-            use_family_lists: self.use_family_lists || other.use_family_lists,
             use_family_ids: self.use_family_ids || other.use_family_ids,
         }
     }
@@ -906,7 +893,7 @@ impl PartialNetDir {
         // there.)
         //
         // TODO this is rather duplicative of NetParameters::from_netstatus
-        let _ = params.saturating_update(consensus.params().without_defaults().iter());
+        let _ = params.saturating_update(consensus.preamble.params.without_defaults().iter());
 
         // Now see if the user has any parameters to override.
         // (We have to do this now, or else changes won't be reflected in our
@@ -1052,7 +1039,7 @@ impl MdReceiver for PartialNetDir {
 impl NetDir {
     /// Return the declared lifetime of this NetDir.
     pub fn lifetime(&self) -> &netstatus::Lifetime {
-        self.consensus.lifetime()
+        &self.consensus.preamble.lifetime
     }
 
     /// Add `md` to this NetDir.
@@ -1180,7 +1167,8 @@ impl NetDir {
     pub fn replace_overridden_parameters(&mut self, new_replacement: &netstatus::NetParamValues) {
         // TODO(nickm): This is largely duplicate code from PartialNetDir::new().
         let mut new_params = NetParameters::default();
-        let _ = new_params.saturating_update(self.consensus.params().without_defaults().iter());
+        let _ =
+            new_params.saturating_update(self.consensus.preamble.params.without_defaults().iter());
         for u in new_params.saturating_update(new_replacement.iter()) {
             warn!("Unrecognized option: override_net_params.{}", u);
         }
@@ -1432,8 +1420,10 @@ impl NetDir {
         assert_eq!(rs.rsa_identity(), rsa_id);
         Some(self.relay_from_rs_and_rsidx(rs, rsidx))
     }
+
     /// Return the relay with a given RSA identity, if we have one
     /// and it is [usable](NetDir#usable).
+    #[cfg(test)]
     fn by_rsa_id(&self, rsa_id: &RsaIdentity) -> Option<Relay<'_>> {
         self.by_rsa_id_unchecked(rsa_id)?.into_relay()
     }
@@ -1485,7 +1475,7 @@ impl NetDir {
     // to put it behind the `hs-common` feature to give us time to consider more.
     #[cfg(feature = "hs-common")]
     pub fn relay_protocol_status(&self) -> &netstatus::ProtoStatus {
-        self.consensus.relay_protocol_status()
+        self.consensus.preamble.proto_statuses.relay()
     }
 
     /// Return a [`ProtoStatus`](netstatus::ProtoStatus) that lists the
@@ -1495,7 +1485,7 @@ impl NetDir {
     // TODO HS: See notes on relay_protocol_status above.
     #[cfg(feature = "hs-common")]
     pub fn client_protocol_status(&self) -> &netstatus::ProtoStatus {
-        self.consensus.client_protocol_status()
+        self.consensus.preamble.proto_statuses.client()
     }
 
     /// Construct a `CircTarget` from an externally provided list of link specifiers,
@@ -1860,8 +1850,8 @@ impl NetDir {
     ///
     /// # Limitations
     ///
-    /// Two relays only belong to the same family if _each_ relay
-    /// claims to share a family with the other.  But if we are
+    /// Two relays only belong to the same family if they both list the same
+    /// family ID. But if we are
     /// missing a microdescriptor for one of the relays listed by this
     /// relay, we cannot know whether it acknowledges family
     /// membership with this relay or not.  Therefore, this function
@@ -1871,11 +1861,10 @@ impl NetDir {
         &'a self,
         relay: &'a Relay<'a>,
     ) -> impl Iterator<Item = Relay<'a>> {
-        let relay_rsa_id = relay.rsa_id();
-        relay.md.family().members().filter_map(move |other_rsa_id| {
-            self.by_rsa_id(other_rsa_id)
-                .filter(|other_relay| other_relay.md.family().contains(relay_rsa_id))
-        })
+        // TODO: This is not an efficient implementation.
+        let family_ids = relay.md.family_ids();
+        self.relays()
+            .filter(|r| r.md.family_ids().iter().any(|id| family_ids.contains(id)))
     }
 
     /// Return the current hidden service directory "time period".
@@ -2968,37 +2957,21 @@ mod test {
 
     #[test]
     fn family_list() {
-        let netdir = construct_custom_netdir(|pos, n, _| {
-            if pos == 0x0a {
-                n.md.family(
-                    "$0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B \
-                     $0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C0C \
-                     $0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D0D"
-                        .parse()
-                        .unwrap(),
-                );
-            } else if pos == 0x0c {
-                n.md.family("$0A0A0A0A0A0A0A0A0A0A0A0A0A0A0A0A0A0A0A0A".parse().unwrap());
-            }
-        })
-        .unwrap()
-        .unwrap_if_sufficient()
-        .unwrap();
+        let netdir = construct_custom_netdir(|_, _, _| {})
+            .unwrap()
+            .unwrap_if_sufficient()
+            .unwrap();
 
-        // In the testing netdir, adjacent members are in the same family by default...
+        // In the testing netdir, adjacent members are in the same family by default.
         let r0 = netdir.by_id(&Ed25519Identity::from([0; 32])).unwrap();
         let family: Vec<_> = netdir.known_family_members(&r0).collect();
-        assert_eq!(family.len(), 1);
-        assert_eq!(family[0].id(), &Ed25519Identity::from([1; 32]));
-
-        // But we've made this relay claim membership with several others.
-        let r10 = netdir.by_id(&Ed25519Identity::from([10; 32])).unwrap();
-        let family: HashSet<_> = netdir.known_family_members(&r10).map(|r| *r.id()).collect();
-        assert_eq!(family.len(), 2);
-        assert!(family.contains(&Ed25519Identity::from([11; 32])));
-        assert!(family.contains(&Ed25519Identity::from([12; 32])));
-        // Note that 13 doesn't get put in, even though it's listed, since it doesn't claim
-        //  membership with 10.
+        // It is undefined whether known_family_members(r0) includes r0 or not.
+        assert!([1, 2].contains(&family.len()));
+        assert!(
+            family
+                .iter()
+                .any(|r| r.id() == &Ed25519Identity::from([1; 32]))
+        );
     }
     #[test]
     #[cfg(feature = "geoip")]
